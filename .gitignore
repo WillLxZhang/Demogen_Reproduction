@@ -1,0 +1,33 @@
+# Local experiment artifacts.
+data/
+logs/
+outputs/
+
+# Upstream documentation media that bloats the personal mirror.
+repos/robomimic/docs/images/
+repos/robosuite/docs/images/
+
+# Local screenshots and throwaway media.
+Files/Logs/*.png
+Files/Logs/*.jpg
+Files/Logs/*.jpeg
+Files/Logs/*.mp4
+!Files/imgs/image.png
+!Files/imgs/image-1.png
+
+# Large model and dataset artifacts that should stay local.
+*.ckpt
+*.pth
+*.pt
+*.hdf5
+*.zarr/
+*.mp4
+
+# Python cache and local environments.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+.DS_Store
