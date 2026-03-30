@@ -17,7 +17,7 @@
 
 ## Setup
 
-工作区搭建和环境配置
+工作区搭建
 
 ```
 /home/willzhang/Science/Reproduction/Reproduction
