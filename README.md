@@ -217,21 +217,26 @@ Lift 的 raw `action[:3]` 是来自 controller 的 pulse，demogen motion 段的
 #### 为什么要加 motion_action 修正？
 DemoGen 在 motion 段思路是：
 * 先生成一条新轨迹：根据 source 轨迹的起点、终点和新物体位置，构造 motion 段每一帧的 step_action 决定新 demo 动作
-* 再算轨迹偏差： step_action - source_action[:3]，得到这一帧相对 source 的增量差
+* 因为点云和state需要和轨迹同步，所以需要逐帧计算轨迹偏差： step_action - source_action[:3]，得到这一帧相对 source 的增量差
 * 把这个差累积成 trans_sofar，用 trans_sofar 去平移 robot 的 state 和 point_cloud
 
-但是`step_action` 是几何位移，`raw_action[:3]` 是控制脉冲，两个量不在同一语义空间。
+![alt text](./Files/imgs/image-2.png)
+
+但是`step_action` 是几何位移，`raw_action[:3]` 是控制脉冲，两个量不在同一语义空间。这会导致平移出来的state有误差
 
 #### 怎么做？
 
 * source action 首先被转换为一份近似几何运动参考 motion_action，这一步仍然带有近似误差；
-* DemoGen 基于这份几何参考，在 motion 段中计算相对 source 的额外平移增量，这样的语义比直接对 raw pulse 做减法求得平移量更稳定；
+* DemoGen 基于这份近似几何量，在 motion 段中计算相对 source 的额外平移增量，这样的语义比直接对 raw pulse 做减法求得平移量更稳定；
 * 这部分几何增量再通过 pulse encoder 映射回 controller action，并叠加到原始 executable pulse 上；
 * 最终写回 generated zarr 的 data/action 仍然是 pulse 语义的 executable action。
 
+
+![alt text](./Files/imgs/image-3.png)
+
 #### **motion_action 怎么来的？**
 
-1.  通过 `convert_robomimic_hdf5_to_zarr_exec_xzfullfir4sum.py` 得到 base source zarr。得到一版几何接口。**这版误差体现在：物体位置大致能对准，但是伸的深度不够**
+1.  通过 `convert_robomimic_hdf5_to_zarr_exec_xzfullfir4sum.py` 得到 base source zarr。得到一版几何接口。**这版误差体现在：如果直接用这个去做generate，出来的物体位置不算准，伸的深度不够**
 
 如何构造一版几何的 `motion_action`：
   - x / z：用 full FIR 响应把 pulse 映射成几何效果
@@ -250,7 +255,7 @@ conda run -n demogen python repos/DemoGen/real_world/convert_robomimic_hdf5_to_z
   --output-zarr /home/willzhang/Science/Reproduction/Reproduction/repos/DemoGen/data/datasets/source/lift_0_v9_execmotion_xzfullfir4sum.zarr
 ```
 
-1. 用 `convert_source_zarr_original_schedule_motion.py` 处理 source zarr，读取`state`/ `action`/ `motion_action`/`skill1_frame`，然后重写 motion 段的 `motion_action[:3]`，调用 `build_original_one_stage_schedule(...)`，应用和demogen相同的原则，假设平移量是0，会生成什么样的轨迹？这个轨迹之后在demogen中直接做减法求得平移量：
+2. 用 `convert_source_zarr_original_schedule_motion.py` 处理 source zarr，读取`state`/ `action`/ `motion_action`/`skill1_frame`，然后重写 motion 段的 `motion_action[:3]`，调用 `build_original_one_stage_schedule(...)`，应用和demogen相同的原则，假设平移量是0，会生成什么样的轨迹？这个轨迹之后在demogen中直接做减法求得平移量：
   - 取 source 轨迹在 motion 段的起点 `state[0, :3]`
   - 取终点 `state[skill1_frame - 1, :3]`
   - 把 z 方向拆成固定步长，再把剩余帧平均分给 xy，翻转后得到先走 xy 下探 z的schedule
@@ -274,31 +279,30 @@ conda run -n demogen python repos/DemoGen/real_world/convert_source_zarr_origina
 ```
 
 #### **motion_action 在 generate 里怎么被用？**
+`demogen_lift_phase_copy.py`：外挂一个模块，override了demogen.py的one_stage_augment，读取和保存还用demogen完成，只是在这里进行增广
+
 输入：
+- `state`/`pcd`
 - `source_exec_action`：controller action，来自 `data/action`
 - `source_motion_action`：给 DemoGen 参考的几何 motion，来自 `data/motion_action`。
 
 每一帧：
-- 在 `demogen_lift_phase_copy.py` 里，先算这一帧额外要补的位移 `extra_step = translation_increments[j]`。表示这次 retarget 的增广平移量。
+- 先按 schedule 把总平移拆成每帧的 translation_increments （这次 retarget 的增广平移量）， `extra_step = translation_increments[j]`。
 - 再构造这一帧理论上想实现的几何 motion：
   - `step_action = source_motion_action[:3] + extra_step`
-- 然后进入 `demogen.py` 的 `source_plus_correction`：
-  - `correction_step = step_action - source_motion_action[:3]`
-  - 这表示：新目标下这一帧理论 motion，减去 source 原本这一帧的参考 motion，还差多少
-  - `correction_xyz = _encode_motion_exec_xyz(correction_step, ...)`
-  - 差值再经过 pulse 编码，变成加回 controller 的 correction
+- 然后回到 `demogen.py`中增加的`source_plus_correction`：
+  - `correction_step = step_action - source_motion_action[:3]`。表示：新目标下这一帧理论 motion，减去 source 原本这一帧的参考 motion，还差多少
+  - `correction_xyz = _encode_motion_exec_xyz(correction_step, ...)`。差值再经过 pulse 编码，变成加回 controller 的 correction
   - `exec_xyz = source_exec_action[:3] + correction_xyz`，映射回 pulse 空间
 
 #### Notice
-1. `translation_correction_scale_xyz = [0.5, 0.5, 1.0]`
-- xy correction 只加半份，z 保持满额
-- 用来抑制接近物体和下探阶段易出现的横向过修正
-- 当前链路里 xy 更容易因为 pulse 量化和 schedule 近似被放大，所以只修一半，但是针对不同任务可能需要调整，故此为一优化方向
+1. motion_action本身存在误差，需要`translation_correction_scale_xyz = [0.5, 0.5, 1.0]`用来修正extrastep
+- xy correction 只加0.5，z加1倍。用来抑制接近物体和下探阶段易出现的横向过修正。当前pipeline里 xy 更容易因为 pulse 量化和 schedule 近似被放大，所以只修一半，但是针对不同任务可能需要调整，故此为一优化方向
 
-2. state_based 和原版 legacy 的区别
+2. state_based 和原版 legacy 的区别 
 - `legacy` 把 source 的 motion 起点近似写成 `state[start] - action[start]`，默认认为 `action[:3]` 本身就接近逐帧 motion；同时它按 `trans_this_frame = step_action - source_motion_action[:3]` 去逐帧累积 `trans_sofar`；
-- `state_based` 直接把 `state[start][:3]` 当作 motion 起点；后续维护 `desired_pos += step_action`，再用 `trans_sofar = desired_pos - source_pos`， 比 `legacy` 更少依赖 `action[:3]` 本身的几何语义
-- 这更适合 pulse ：因为 controller pulse 不是稳定的逐帧几何位移，用 `state` 当锚点比用 `action` 反推轨迹更稳
+- `state_based` 把 `state[start][:3]` 当作 motion 起点；后续维护 `desired_pos += step_action`，再用 `trans_sofar = desired_pos - source_pos`， 比 `legacy` 更少依赖 `action[:3]` 本身的几何语义
+- 这更适合 pulse ：因为 controller pulse 不是逐帧几何位移，用 `state` 比用 `action` 反推轨迹更稳
 
 3. 配置文件在：`lift_v28_originalschedule_phasecopy_statedelta_halfcorr_v9_s220.yaml` 
 
@@ -307,11 +311,12 @@ conda run -n demogen python repos/DemoGen/real_world/convert_source_zarr_origina
 cd /home/willzhang/Science/Reproduction/Reproduction/repos/DemoGen/demo_generation
 
 bash gen_demo.sh lift_0_v28_originalschedule_phasecopy_statedelta_halfcorr_v9_s220 test grid 4 False
+
 ```
 
 其中：
 - `bash gen_demo.sh lift_v28_originalschedule_phasecopy_statedelta_halfcorr_v9_s220 ...`
-- `gen_demo.sh` 调用 `gen_demo.py`读取 yaml，并根据其中的 `_target_` 实例化 generator，指向 demogen_lift_phase_copy.py
+- `gen_demo.sh` 调用 `gen_demo.py`读取 yaml，并根据其中的 `_target_` 实例化 generator，指向 `demogen_lift_phase_copy.py`
 - 每条增广16条
 ### 增广数据可视化验证
 
@@ -362,6 +367,12 @@ bash eval_panda_phasebias.sh \
 
 - `79.ckpt` 对应 `phasebias v1`，run 名是 `pb_a` / `dp3phasebias`。它改 sampler：把 pre-grasp descent 和 gripper switch 附近的 window 重复采样，让 raw-action DP3 更频繁看到“下探 + 闭合”片段。
 
+
+
+### 三层误差
+* source_motion_action 本身就只是近似几何 proxy，不是真实物理真值。
+* extra_step 也是按 schedule 分配出来的增广位移。
+* 最后把 correction 再 encode 回 pulse，这里又会有 threshold / residual / 饱和误差。
 ---
 
 ## 在 robomimic 上训练 DP

@@ -1,0 +1,40 @@
+_target_: demo_generation.demogen.DemoGen
+
+data_root: data
+source_name: lift_v9_execmotion_xzfullfir4sum
+
+task_n_object: 1
+
+use_linear_interpolation: true
+interpolate_step_size: 0.01
+
+motion_retarget_mode: state_based
+motion_action_key: motion_action
+motion_exec_mode: osc_pose_pulse
+motion_exec_xyz_strategy: source_plus_correction
+motion_exec_pulse_scale_xyz: [0.00578, 0.00538, 0.00858]
+motion_exec_pulse_threshold_ratio: 1.0
+
+use_manual_parsing_frames: true
+parsing_frames:
+  motion-1: 0
+  skill-1: 160
+  motion-2: null
+  skill-2: null
+
+mask_names:
+  object: cube
+
+trans_range:
+  src:
+    object: [[0, 0, 0], [0, 0, 0]]
+    target: null
+  test:
+    object: [[-0.06, -0.06, 0], [0.06, 0.06, 0]]
+    target: null
+
+generation:
+  range_name: test
+  n_gen_per_source: 16
+  render_video: True
+  mode: grid
