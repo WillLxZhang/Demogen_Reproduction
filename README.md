@@ -306,7 +306,7 @@ conda run -n demogen python repos/DemoGen/real_world/convert_source_zarr_origina
 ```bash 
 cd /home/willzhang/Science/Reproduction/Reproduction/repos/DemoGen/demo_generation
 
-bash gen_demo.sh lift_0_v28_originalschedule_phasecopy_statedelta_halfcorr_v9_s220 test grid 16 False
+bash gen_demo.sh lift_0_v28_originalschedule_phasecopy_statedelta_halfcorr_v9_s220 test grid 4 False
 ```
 
 其中：
@@ -321,7 +321,7 @@ conda run -n demogen python /home/willzhang/Science/Reproduction/Reproduction/sc
   --source-demo /home/willzhang/Science/Reproduction/Reproduction/data/raw/lift_0/1774702988_8036063/demo.hdf5 \
   --episode 0 \
   --control-steps 1 \
-  --output-video /home/willzhang/Science/Reproduction/Reproduction/outputs/video_debug/replay_lift_0_v28_test16_ep0.mp4
+  --output-video /home/willzhang/Science/Reproduction/Reproduction/videos/replay_lift_0_v28_test16_ep0.mp4
 ```
 
 ### 增广数据 Gate

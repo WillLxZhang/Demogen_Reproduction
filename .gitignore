@@ -2,6 +2,7 @@
 data/
 logs/
 outputs/
+videos/
 
 # Upstream documentation media that bloats the personal mirror.
 repos/robomimic/docs/images/
