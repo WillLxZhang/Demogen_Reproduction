@@ -331,6 +331,8 @@ conda run -n demogen python /home/willzhang/Science/Reproduction/Reproduction/sc
 
 ### 增广数据 Gate
 
+用 generated zarr 里的 action 在 robosuite 里重放一遍，i再将 replay 出来的 agent_pos（state）和 zarr 里原本存的 agent_pos 逐帧对比末端位置 xyz。计算轨迹整体的 RMSE 和最后一帧的 final error。目的是看这条轨迹的state和action是否自洽。同时还附带脚本检测增广数据中抓取是否成功。
+
 ```bash
 conda run -n demogen python /home/willzhang/Science/Reproduction/Reproduction/scripts/validate_generated_zarr_consistency.py \
   --zarr /home/willzhang/Science/Reproduction/Reproduction/repos/DemoGen/data/datasets/generated/lift_0_v28_originalschedule_phasecopy_statedelta_halfcorr_v9_s220_test_16.zarr \
@@ -340,7 +342,7 @@ conda run -n demogen python /home/willzhang/Science/Reproduction/Reproduction/sc
   --final-threshold 0.015 \
   --output-json /home/willzhang/Science/Reproduction/Reproduction/outputs/analysis/lift_0_v28_test16_consistency.json
 ```
-结果：144条全部Lift成功，说明该pipeline有效
+结果：144条全部Lift成功并且通过gate测试，说明该pipeline有效
 
 ### 失误 
 思维惯性用demogen里面的dp3去训练，但是由于前述原因“最终写回 generated zarr 的 data/action 仍然是 pulse 语义的 action”。导致学到的仍是 pulse-like action distribution，这样的动作标签里有很多接近 0 的帧，夹杂少量离散脉冲，再加上 encode / threshold / residual 的量化效应，训练会更难、更不稳定。
@@ -349,6 +351,7 @@ conda run -n demogen python /home/willzhang/Science/Reproduction/Reproduction/sc
 
 /home/willzhang/Science/Reproduction/Reproduction/repos/DemoGen/data/ckpts/lift_v28_originalschedule_phasecopy_statedelta_halfcorr_v9_s220_test_9-dp3phasebias-seed0-pb_a/checkpoints/79.ckpt
 
+- `79.ckpt` 对应 `phasebias v1`训练线。它修改了 sampler：把 pre-grasp descent 和 gripper switch 附近的 window 重复采样，让 DP3 更频繁看到下探和闭合片段。
 ```bash
 cd /home/willzhang/Science/Reproduction/Reproduction/repos/DemoGen/diffusion_policies
 
@@ -362,12 +365,6 @@ bash eval_panda_phasebias.sh \
   1 \
   pb_a
 ```
-
-补充说明：
-
-- `79.ckpt` 对应 `phasebias v1`，run 名是 `pb_a` / `dp3phasebias`。它改 sampler：把 pre-grasp descent 和 gripper switch 附近的 window 重复采样，让 raw-action DP3 更频繁看到“下探 + 闭合”片段。
-
-
 
 ### 三层误差
 * source_motion_action 本身就只是近似几何 proxy，不是真实物理真值。
