@@ -1,6 +1,7 @@
 """
 This file contains some PyTorch utilities.
 """
+import os
 import numpy as np
 import math
 import torch
@@ -258,12 +259,17 @@ def backprop_for_loss(net, optim, loss, max_grad_norm=None, retain_graph=False):
     if max_grad_norm is not None:
         torch.nn.utils.clip_grad_norm_(net.parameters(), max_grad_norm)
 
+    # Optionally skip per-parameter grad-norm logging when only the auxiliary
+    # norm statistic is unstable on a particular CUDA stack.
+    skip_grad_norms = os.environ.get("ROBOMIMIC_SKIP_GRAD_NORMS", "0") == "1"
+
     # compute grad norms
     grad_norms = 0.
-    for p in net.parameters():
-        # only clip gradients for parameters for which requires_grad is True
-        if p.grad is not None:
-            grad_norms += p.grad.data.norm(2).pow(2).item()
+    if not skip_grad_norms:
+        for p in net.parameters():
+            # only clip gradients for parameters for which requires_grad is True
+            if p.grad is not None:
+                grad_norms += p.grad.data.norm(2).pow(2).item()
 
     # step
     optim.step()

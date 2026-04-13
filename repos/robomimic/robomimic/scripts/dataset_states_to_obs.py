@@ -129,7 +129,7 @@ def extract_trajectory(
         # infer reward signal
         # note: our tasks use reward r(s'), reward AFTER transition, so this is
         #       the reward for the current timestep
-        r = env.get_reward()
+        r = env.get_reward(actions[t - 1])
 
         # infer done signal
         done = False

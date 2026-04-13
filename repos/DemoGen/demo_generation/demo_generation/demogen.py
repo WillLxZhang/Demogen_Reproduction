@@ -22,6 +22,7 @@ from matplotlib.ticker import FormatStrFormatter
 
 import matplotlib.pyplot as plt
 import logging
+from omegaconf import DictConfig, ListConfig
 
 
 class DemoGen:
@@ -101,6 +102,39 @@ class DemoGen:
         cprint(f"Motion retarget action key: {self.motion_action_key}", "cyan")
         cprint(f"Motion exec mode: {self.motion_exec_mode}", "cyan")
         cprint(f"Motion exec xyz strategy: {self.motion_exec_xyz_strategy}", "cyan")
+
+    def resolve_parsing_frame(self, frame_name: str, episode_idx: int):
+        if self.parsing_frames is None:
+            raise ValueError(
+                f"parsing_frames is required when resolving manual frame '{frame_name}'"
+            )
+        if frame_name not in self.parsing_frames:
+            raise KeyError(f"Missing parsing_frames['{frame_name}']")
+
+        value = self.parsing_frames[frame_name]
+        if value is None:
+            return None
+
+        if isinstance(value, (list, tuple, ListConfig)):
+            if episode_idx >= len(value):
+                raise IndexError(
+                    f"parsing_frames['{frame_name}'] only has {len(value)} entries, "
+                    f"cannot index source episode {episode_idx}"
+                )
+            value = value[episode_idx]
+        elif isinstance(value, (dict, DictConfig)):
+            for key in (str(episode_idx), episode_idx, f"demo_{episode_idx + 1}"):
+                if key in value:
+                    value = value[key]
+                    break
+            else:
+                raise KeyError(
+                    f"parsing_frames['{frame_name}'] has no entry for source episode {episode_idx}"
+                )
+
+        if value is None:
+            return None
+        return int(value)
 
     @staticmethod
     def _init_motion_exec_state():
@@ -355,9 +389,9 @@ class DemoGen:
             pcds = source_demo["point_cloud"]
             
             if self.use_manual_parsing_frames:
-                skill_1_frame = self.parsing_frames["skill-1"]
-                motion_2_frame = self.parsing_frames["motion-2"]
-                skill_2_frame = self.parsing_frames["skill-2"]
+                skill_1_frame = self.resolve_parsing_frame("skill-1", i)
+                motion_2_frame = self.resolve_parsing_frame("motion-2", i)
+                skill_2_frame = self.resolve_parsing_frame("skill-2", i)
             else:
                 ee_poses = source_demo["state"][:, :3]
                 skill_1_frame, motion_2_frame, skill_2_frame = self.parse_frames_two_stage(pcds, i, ee_poses)
@@ -591,7 +625,7 @@ class DemoGen:
             # visualizer.visualize_pointcloud(pcds[0])
             
             if self.use_manual_parsing_frames:
-                skill_1_frame = self.parsing_frames["skill-1"]
+                skill_1_frame = self.resolve_parsing_frame("skill-1", i)
             else:
                 ee_poses = source_demo["state"][:, :3]
                 skill_1_frame = self.parse_frames_one_stage(pcds, i, ee_poses)

@@ -1,0 +1,50 @@
+_target_: demo_generation.demogen_lift_phase_copy.LiftPhaseCopyDemoGen
+
+data_root: data
+source_name: lift_0_v31_replayh1_light_schedule_source
+generated_name: lift_0_v31_replayh1_light_schedule_phasecopy_statedelta_halfcorr
+
+task_n_object: 1
+
+use_linear_interpolation: false
+interpolate_step_size: 0.01
+
+motion_retarget_mode: state_based
+motion_action_key: motion_action
+motion_exec_mode: osc_pose_pulse
+motion_exec_xyz_strategy: source_plus_correction
+motion_exec_pulse_scale_xyz: [0.00175479, 0.00186833, 0.00340164]
+motion_exec_pulse_threshold_ratio: 1.0
+
+translation_exec_compose_mode: inherit
+translation_schedule_mode: state_delta_axiswise_pre_descend_xy
+translation_schedule_smooth_window: 5
+translation_schedule_floor_ratio: 0.1
+translation_schedule_active_ratio: 1.0
+translation_schedule_hold_final_frame: true
+translation_schedule_pre_descend_margin_frames: 0
+translation_correction_scale_xyz: [0.5, 0.5, 1.0]
+
+use_manual_parsing_frames: true
+parsing_frames:
+  motion-1: 0
+  skill-1: 190
+  motion-2: null
+  skill-2: null
+
+mask_names:
+  object: cube
+
+trans_range:
+  src:
+    object: [[0, 0, 0], [0, 0, 0]]
+    target: null
+  test:
+    object: [[-0.035, -0.035, 0], [0.035, 0.035, 0]]
+    target: null
+
+generation:
+  range_name: test
+  n_gen_per_source: 4
+  render_video: false
+  mode: grid

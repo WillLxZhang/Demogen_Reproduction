@@ -103,7 +103,7 @@ class EnvBase(abc.ABC):
         return
 
     @abc.abstractmethod
-    def get_reward(self):
+    def get_reward(self, action=None):
         """
         Get current reward.
         """

@@ -1,0 +1,52 @@
+_target_: demo_generation.demogen_stack_phase_copy_replay_consistent.StackPhaseCopyReplayConsistentDemoGen
+
+data_root: data
+source_name: stack_cube_0_v1_replayh1_twophase_source
+generated_name: stack_cube_0_v5_replayh1_twophase_noschedule
+
+task_n_object: 2
+
+use_linear_interpolation: false
+interpolate_step_size: 0.01
+
+motion_retarget_mode: state_based
+motion_action_key: motion_action
+motion_exec_mode: osc_pose_pulse
+motion_exec_xyz_strategy: source_plus_correction
+motion_exec_pulse_threshold_ratio: 1.0
+
+translation_exec_compose_mode: defer_extra_on_source_conflict
+translation_schedule_mode: state_delta_axiswise_pre_descend_xy
+translation_schedule_smooth_window: 5
+translation_schedule_floor_ratio: 0.1
+translation_schedule_active_ratio: 1.0
+translation_schedule_hold_final_frame: true
+translation_schedule_pre_descend_margin_frames: 0
+
+source_demo_hdf5: ../../../data/raw/stack_cube_0/1775663680_9007828/demo.hdf5
+source_control_steps: 1
+
+use_manual_parsing_frames: true
+parsing_frames:
+  motion-1: 0
+  skill-1: 380
+  motion-2: 400
+  skill-2: 620
+
+mask_names:
+  object: cubeA
+  target: cubeB
+
+trans_range:
+  src:
+    object: [[0, 0, 0], [0, 0, 0]]
+    target: [[0, 0, 0], [0, 0, 0]]
+  test:
+    object: [[-0.03, -0.03, 0], [0.03, 0.03, 0]]
+    target: [[-0.03, -0.03, 0], [0.03, 0.03, 0]]
+
+generation:
+  range_name: test
+  n_gen_per_source: 16
+  render_video: false
+  mode: grid

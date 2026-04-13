@@ -1,6 +1,282 @@
 [TOC]
+# Pipeline New
+## 原文内容
+* Pick-Cube、Handle-Press 是单物体空间随机化任务；Stack-Cube 是双物体任务。
+* 原文设置里，单物体任务从 1 条 source demonstration 生成 100 条空间增广 demonstrations；双物体任务因为初始配置组合更多，会生成 200 条 demonstrations。
 
-# Pipeline
+按照 3 *Seed / 20 rollout 的最大值/平均值成功率统计
+* Pick-Cube DemoGen 的 76/73，优于 10 Source 的 29/29，接近 25 Source 的 82/74；
+* Handle-Press 从 17/16 提升到 100/100，与 10 Source 的 100/99 基本持平，并达到 25 Source 的 100/100。
+* Stack-Cube 从 0/0 提升到 79/77，优于 10 Source 的 44/38，并接近 25 Source 的 95/93。
+
+* 遗留问题：单视角观测下的 visual mismatch：随着物体在三维空间中移动，其可见外观和透视关系会发生变化，但合成点云仍保留 source demonstration 中的固定视角外观，因此 synthetic data 与真实观测之间存在偏差。
+
+* 论文在 Pick-Cube 上进一步发现，当增广数据的空间覆盖或密度继续增加时，性能提升会逐渐饱和。
+
+
+## 数据语义
+
+```
+selected4 demo / low_dim / depth
+-> replayh1 light source zarr
+-> schedule source zarr
+-> v37 replayconsistent generate(diagfix)
+-> relalign solve
+-> consistency / success gate
+-> replayobs low_dim.hdf5
+-> robomimic train
+```
+
+### source zarr
+
+- 作用：给 DemoGen 提供 source 轨迹。
+- 核心：同时保留执行 action 和 replay 标定出来的几何 motion。
+
+### schedule source zarr
+
+- 作用：把 generate 要参考的 `motion_action` 整理出来。
+- 核心：前缀 `motion_action` 用 replay 标定过的 schedule。
+
+### generated zarr
+
+- 作用：做空间增广，产出 template。
+- 核心：写出来的 `state/action/point_cloud` 能对上 replay。
+
+### solved zarr
+
+- 作用：把模板轨迹修到任务成功，再把真实 replay 结果写回。
+- 核心：这是最终训练候选。
+
+### replayobs low_dim.hdf5
+
+- 作用：把 solved zarr 回导成 robomimic 训练集。
+- 核心：generated demo 的 `object obs` 来自 replay 真值。
+
+---
+
+## 1. 输入
+- source demo：
+- source low_dim：
+- source depth
+
+---
+
+## 2. source
+
+新线的 source 分两步：
+
+1. `raw hdf5 -> replayh1 light source zarr`
+2. `light source zarr -> schedule source zarr`
+
+### 2.1 replayh1 light source
+
+脚本：
+
+- `repos/DemoGen/real_world/convert_robomimic_hdf5_to_zarr_exec_replay_h1_light.py`
+
+内容：
+
+- 从 `demo.hdf5 / low_dim.hdf5 / depth.hdf5` 读取原始轨迹和观测。
+- 保留原始 controller action，写到 zarr 里的 `data/action`。
+- 用 robosuite 重放每一帧 `set_state -> step(action)`，得到前缀区间里真实执行出来的位移“如果从第 t 帧的状态出发，执行第 t 帧这条动作，末端实际会移动的位移”。
+- 把这份 replay 标定结果写成 `replay_h1_delta`。
+- 同时生成 `state / agent_pos / point_cloud`。
+
+source zarr 里字段：
+- `data/action`
+  - controller 真正执行的 pulse action。
+- `data/replay_h1_delta`
+  - 用 replay 标定过的逐帧几何位移。
+- `data/state`
+  - 轨迹状态。
+- `data/point_cloud`
+  - 点云观测。
+
+---
+
+### 2.2 schedule source
+
+脚本：
+
+- `repos/DemoGen/real_world/convert_source_zarr_original_schedule_replay_h1.py`
+
+内容：
+
+- 读取上一步的 source zarr。
+- 用 `replay_h1_delta` 在 `skill1` 前缀上的累积位移，重建 zero-translation 的原始单阶段 schedule。
+```
+1. 先求总位移
+  total_xyz = replay_h1_delta[:skill1, :3].sum(axis=0)
+
+2.再按 old one-stage 规则重分配
+  默认不是线性插值：
+    z 单独拿出来
+    按 z_step_size=0.015 切成很多个固定小步。比如总共要下探 -0.09，就拆成 6 帧，每帧 [0, 0, -0.015]
+    剩下的帧数全给 xy，xy 平均分。比如总共 x=0.06, y=-0.03，剩 184 帧，就每帧给 [0.06/184, -0.03/184, 0]
+    最后把顺序反过来：
+      前面先走 xy
+      后面几帧再走 z
+```
+- 把这份 schedule 写回 `data/motion_action`。
+- `data/action` 仍然保持 source demo 的action。
+
+---
+
+## 3. generate
+配置文件：
+
+- `repos/DemoGen/demo_generation/demo_generation/config/lift_0_v37_replayh1_light_schedule_phasecopy_replayconsistent_selected4_d2467_diagfix.yaml`
+
+命令：
+
+```bash
+cd /home/willzhang/Science/Reproduction/Reproduction/repos/DemoGen/demo_generation
+
+conda run -n demogen bash gen_demo.sh \
+  lift_0_v37_replayh1_light_schedule_phasecopy_replayconsistent_selected4_d2467_diagfix \
+  test grid 25 False
+```
+内容：
+- 以 `motion_action` 作为几何参考轨迹。
+- 把目标平移 `object_translation` 分配到skill1-轨迹里。
+  - 先按规则合成这一帧 action
+  - 再把这条 action 真正在 robosuite 里执行一次
+  - 执行后拿环境返回的 agent_pos
+  - 把这个返回的 agent_pos 写进 zarr 作为这一帧 / 下一步轨迹的一部分
+- 再编码回 controller pulse。
+- 保存生成后的 `action / agent_pos / point_cloud`。
+- 每条样本都带 `source_episode_idx`、`object_translation`、`motion_frame_count`。
+- 这个 zarr 的 `state/action` 已经能对上 replay。
+
+对比：
+- 旧线路 LiftPhaseCopy：phase copy + scale + 估计式 state 写回
+- phase copy + replay_h1 source
+
+template zarr：
+- agent_pos / state 对 replay 对齐，因为是在转换为source阶段replay读取的，所以一定正确，同时state/action
+- 但 action 只是按当前编码规则合成出来，并经过 replay 写回后的动作，任务不一定成功。
+
+---
+
+## 4. solve
+
+脚本：
+- `scripts/export_lift_solved_from_template_zarr_relalign.py`
+
+命令：
+
+```bash
+cd /home/willzhang/Science/Reproduction/Reproduction
+
+conda run -n demogen python scripts/export_lift_solved_from_template_zarr_relalign.py \
+  --config repos/DemoGen/demo_generation/demo_generation/config/lift_0_v37_replayh1_light_schedule_phasecopy_replayconsistent_selected4_d2467_diagfix.yaml \
+  --template-zarr /media/willzhang/KINGSTON/zlxtemp/demogen_selected4_diagfix/data/datasets/generated/lift_0_v37_replayh1_light_schedule_phasecopy_replayconsistent_selected4_d2467_diagfix_test_25.zarr \
+  --source-demo /home/willzhang/Science/Reproduction/Reproduction/data/raw/lift_0/1774702988_8036063/demo_selected4_d2467.hdf5 \
+  --episodes all \
+  --control-steps 1 \
+  --action-deviation-weight 1e-4 \
+  --relative-tail-steps 40 \
+  --relative-cost-weight 4.0 \
+  --output-zarr /media/willzhang/KINGSTON/zlxtemp/demogen_selected4_diagfix/outputs/generated/lift_0_v37_selected4_d2467_relalign_all_diagfix.zarr \
+  --output-json /media/willzhang/KINGSTON/zlxtemp/demogen_selected4_diagfix/outputs/analysis/lift_0_v37_selected4_d2467_relalign_all_diagfix.json
+```
+内容：
+- 逐条读取 template zarr 里的：
+  - `source_episode_idx`
+  - `object_translation`
+  - `motion_frame_count`
+- template 提供目标：
+  - 前缀每一帧希望到达的末端轨迹
+  - 抓取尾窗里希望满足的 eef 相对 cube 位置
+    - 抓取尾窗：tail_start = solve_steps - relative_tail_steps（起点 = solve_steps - 40）
+    当 step_idx < tail_start 时，相对位置约束权重是 0
+    从 step_idx >= tail_start 开始加 eef 相对 cube 的约束。权重线性增加，到前缀最后一步最大
+- solve 在 robosuite 里做前向模拟，先给候选 prefix action。再把整条 episode 在 robosuite 里 replay 一遍，看实际跑出来的轨迹和 template 目标差多少。
+- 最后把 replay 出来的真实：
+  - `state`
+  - `action`
+  - `point_cloud`
+  重写回 zarr。
+
+ 
+---
+
+## 5. gate
+
+
+1. consistency
+2. success
+
+### consistency
+脚本：
+- `scripts/validate_generated_zarr_consistency.py`
+  - 用 zarr 里的 action 在 robosuite 里重放。
+  - 对比 replay 出来的轨迹和 zarr 里保存的轨迹。
+  - 检查这份 solved zarr 的 `state/action` 是否自洽。
+
+### success
+脚本：
+- `scripts/eval_generated_zarr_success_rate.py`
+  - 直接在 robosuite 里评估 solved zarr 的任务成功率。
+
+---
+## 6. exportobs
+
+脚本：
+- `repos/DemoGen/real_world/export_demogen_zarr_to_robomimic_lowdim_replayobs.py`
+
+命令：
+
+```bash
+cd /home/willzhang/Science/Reproduction/Reproduction
+
+conda run -n demogen python repos/DemoGen/real_world/export_demogen_zarr_to_robomimic_lowdim_replayobs.py \
+  --generated-zarr /media/willzhang/KINGSTON/zlxtemp/demogen_selected4_diagfix/outputs/generated/lift_0_v37_selected4_d2467_relalign_all_diagfix.zarr \
+  --source-low-dim-hdf5 /home/willzhang/Science/Reproduction/Reproduction/data/raw/lift_0/1774702988_8036063/low_dim_selected4_d2467.hdf5 \
+  --output-hdf5 /media/willzhang/KINGSTON/zlxtemp/demogen_selected4_diagfix/outputs/robomimic/lift_0_v37_selected4_d2467_relalign_all_diagfix_replayobs_lowdim.hdf5 \
+  --include-source-demos \
+  --control-steps 1 \
+  --overwrite
+```
+内容：
+
+以前export回去导出来的是近似平移出来的 object obs。这里导出的 generated obs 是 replay 观测。
+- 读取 solved zarr 的每条 episode。
+- 用 `source episode + object_translation` 构造 reset state。
+- 在 robosuite 里重新 replay 整条 generated action。
+- 每一帧读取 low-dim 观测：
+  - `robot0_eef_pos`
+  - `robot0_eef_quat`
+  - `robot0_gripper_qpos`
+  - cube 的 `pos / quat`
+- 再拼成 robomimic 的 `object`：
+  - `object = [object_pos, object_quat, object_pos - eef_pos]`
+
+
+最后得到 robomimic 标准训练格式：
+
+- `data/demo_i/actions`
+- `data/demo_i/obs/robot0_eef_pos`
+- `data/demo_i/obs/robot0_eef_quat`
+- `data/demo_i/obs/robot0_gripper_qpos`
+- `data/demo_i/obs/object`
+
+## Eval
+原文的eval为3*seed 随机roll 每seed20，这里使用相同配置
+### Lift Cube
+随机3 Seed / 20 rollout 测试中
+- 4-100 相比原文 100 取得 65% / 成功率；单seed roll取得最高 80% 成功率
+- 9-153取得 95% / 91.6% 成功率
+
+### Presss Handle
+- 4-100 训中70pth roll*10  成功率100% 
+- 3*seed 20roll 成功率100/100，和原文相符
+### Stack Cube Task
+- 转回lowdim的观测replay正常，正在排查原因
+
+---
+
+# Pipeline Old
 
 - `robosuite`
   - 仿真与采集
@@ -11,6 +287,8 @@
 
 - `robomimic`
   - 训练 policy、做 rollout 、评测。
+
+
 
 
 ---

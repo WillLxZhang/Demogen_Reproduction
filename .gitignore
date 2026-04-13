@@ -23,6 +23,7 @@ Files/Logs/*.mp4
 *.hdf5
 *.zarr/
 *.mp4
+*.pdf
 
 # Python cache and local environments.
 __pycache__/

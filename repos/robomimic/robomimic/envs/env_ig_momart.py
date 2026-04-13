@@ -300,7 +300,7 @@ class EnvGibsonMOMART(EB.EnvBase):
         """Get iG flattened state"""
         return {"states": PBU.WorldSaver(exclude_body_ids=self.exclude_body_ids).serialize()}
 
-    def get_reward(self):
+    def get_reward(self, action=None):
         return self.env.task.get_reward(self.env)[0]
         # return float(self.is_success()["task"])
 
