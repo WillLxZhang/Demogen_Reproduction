@@ -32,28 +32,22 @@ selected4 demo / low_dim / depth
 
 #### source zarr
 
-- 作用：给 DemoGen 提供 source 轨迹。
-- 核心：同时保留执行 action 和 replay 标定出来的几何 motion。
+- 给 DemoGen 提供 source 轨迹。保留 action ，新增字段 replay_h1_delta ：从回放里读取的逐帧 state 差
 
 #### schedule source zarr
 
-- 作用：把 generate 要参考的 `motion_action` 整理出来。
-- 核心：前缀 `motion_action` 用 replay 标定过的 schedule。
+- 按先 xy 后 z 的规则把 generate 要参考的 `motion_action` 整理出来
 
 #### generated zarr
 
-- 作用：做空间增广，产出 template。
-- 核心：写出来的 `state/action/point_cloud` 能对上 replay。
+- 做空间增广，产出 template，写出来的 `state/action/point_cloud` 在replay语义下自洽，但不保证任务的成功
 
 #### solved zarr
 
-- 作用：把模板轨迹修到任务成功，再把真实 replay 结果写回。
-- 核心：这是最终训练候选。
+- 优化问题，以上一步的state / eef相对cube的位姿 / 与原 action 的距离三项约束，把模板轨迹修到任务成功，再把真实 replay 结果写回 action，过程较慢
 
 #### replayobs low_dim.hdf5
-
-- 作用：把 solved zarr 回导成 robomimic 训练集。
-- 核心：generated demo 的 `object obs` 来自 replay 真值。
+- 在用solved zarr replay 情况下读取并导出 lowdim
 
 ---
 
@@ -87,7 +81,7 @@ selected4 demo / low_dim / depth
 
 source zarr 里字段：
 - `data/action`
-  - controller 真正执行的 pulse action。
+  - controller 执行的 pulse action。
 - `data/replay_h1_delta`
   - 用 replay 标定过的逐帧几何位移。
 - `data/state`
@@ -105,20 +99,18 @@ source zarr 里字段：
 
 内容：
 
-- 读取上一步的 source zarr。
-- 用 `replay_h1_delta` 在 `skill1` 前缀上的累积位移，重建 zero-translation 的原始单阶段 schedule。
+- 读取上一步的 source zarr。用 `replay_h1_delta` 在 `skill1` 前累积位移，重建 zero-translation 的原始单阶段 schedule。
 ```
 1. 先求总位移
   total_xyz = replay_h1_delta[:skill1, :3].sum(axis=0)
 
 2.再按 old one-stage 规则重分配
-  默认不是线性插值：
     z 单独拿出来
-    按 z_step_size=0.015 切成很多个固定小步。比如总共要下探 -0.09，就拆成 6 帧，每帧 [0, 0, -0.015]
-    剩下的帧数全给 xy，xy 平均分。比如总共 x=0.06, y=-0.03，剩 184 帧，就每帧给 [0.06/184, -0.03/184, 0]
-    最后把顺序反过来：
-      前面先走 xy
-      后面几帧再走 z
+    按 z_step_size=0.015 切成很多个固定小步。
+    比如总共要下探 -0.09，就拆成 6 帧，每帧 [0, 0, -0.015]
+    剩下的帧数全给 xy，xy 平均分。
+    比如总共 x=0.06, y=-0.03，剩 184 帧，就每帧给 [0.06/184, -0.03/184, 0]
+    最后把顺序反过来：先走 xy；后面几帧再走 z
 ```
 - 把这份 schedule 写回 `data/motion_action`。
 - `data/action` 仍然保持 source demo 的action。
@@ -146,18 +138,25 @@ conda run -n demogen bash gen_demo.sh \
   - 再把这条 action 真正在 robosuite 里执行一次
   - 执行后拿环境返回的 agent_pos
   - 把这个返回的 agent_pos 写进 zarr 作为这一帧 / 下一步轨迹的一部分
+  - trans_sofar 也不再是累加 extra_step，而是 current_agent_pos[:3] - source_state[:3]
 - 再编码回 controller pulse。
 - 保存生成后的 `action / agent_pos / point_cloud`。
 - 每条样本都带 `source_episode_idx`、`object_translation`、`motion_frame_count`。
-- 这个 zarr 的 `state/action` 已经能对上 replay。
 
 对比：
 - 旧线路 LiftPhaseCopy：phase copy + scale + 估计式 state 写回
 - phase copy + replay_h1 source
 
 template zarr：
-- agent_pos / state 对 replay 对齐，因为是在转换为source阶段replay读取的，所以一定正确，同时state/action
+- agent_pos / state 对 replay 对齐，因为是在转换为source阶段replay读取的，所以一定正确
+
+欠缺：
+
+- step_action 还要再 encode 回 pulse action，中间有量化、threshold、residual 误差。
+- 后段误差：template zarr 里 replay 对齐的是 motion prefix。prefix 后把剩余段落（tail action，接近物体的阶段）直接接回去，并用 trans_sofar 去平移写 state / pcd。
+point_cloud 也不是真重新渲染出来的，只是 source pcd 按 robot / object 的平移去改。
 - 但 action 只是按当前编码规则合成出来，并经过 replay 写回后的动作，任务不一定成功。
+
 
 ---
 
@@ -184,18 +183,25 @@ conda run -n demogen python scripts/export_lift_solved_from_template_zarr_relali
   --output-json /media/willzhang/KINGSTON/zlxtemp/demogen_selected4_diagfix/outputs/analysis/lift_0_v37_selected4_d2467_relalign_all_diagfix.json
 ```
 内容：
+
+把 prefix action 重新当成一个离散控制问题去重解
 - 逐条读取 template zarr 里的：
   - `source_episode_idx`
   - `object_translation`
   - `motion_frame_count`
+
+- 每一步会在 27 个候选 xyz pulse 里选一个最好的，候选就是 [-1, 0, 1]
+- 优化问题：三项总代价：
+  - 下一步末端世界坐标要贴近期望的平移后轨迹(agent_pos)
+  - 在 prefix 末尾段，eef 相对 cube 的关系贴近 source demo
+  - 不要离 source action 太远
+
 - template 提供目标：
   - 前缀每一帧希望到达的末端轨迹
   - 抓取尾窗里希望满足的 eef 相对 cube 位置
     - 抓取尾窗：tail_start = solve_steps - relative_tail_steps（起点 = solve_steps - 40）
-    当 step_idx < tail_start 时，相对位置约束权重是 0
-    从 step_idx >= tail_start 开始加 eef 相对 cube 的约束。权重线性增加，到前缀最后一步最大
-- solve 在 robosuite 里做前向模拟，先给候选 prefix action。再把整条 episode 在 robosuite 里 replay 一遍，看实际跑出来的轨迹和 template 目标差多少。
-- 最后把 replay 出来的真实：
+    当 step_idx < tail_start 时，相对位置约束权重是 0； 从 step_idx >= tail_start 开始加 eef 相对 cube 的约束。权重线性增加，到前缀最后一步最大
+- solve 在 robosuite 里做前向模拟，先给候选 prefix action。再把整条 episode 在 robosuite 里 replay 一遍，把 replay 出来的真实：
   - `state`
   - `action`
   - `point_cloud`
@@ -243,7 +249,12 @@ conda run -n demogen python repos/DemoGen/real_world/export_demogen_zarr_to_robo
 ```
 内容：
 
-以前export回去导出来的是近似平移出来的 object obs。这里导出的 generated obs 是 replay 观测。
+以前export回去导出来的是近似平移出来的 object obs。
+- 先拿 source lowdim 里的 object 观测。把其中 object_pos 整体加上一个常数 translation。object_quat 直接沿用 source
+- 再和 generated 的 eef_pos 拼成新的 object obs
+
+
+新版导出的 generated obs 是 replay 观测。
 - 读取 solved zarr 的每条 episode。
 - 用 `source episode + object_translation` 构造 reset state。
 - 在 robosuite 里重新 replay 整条 generated action。
@@ -264,7 +275,7 @@ conda run -n demogen python repos/DemoGen/real_world/export_demogen_zarr_to_robo
 - `data/demo_i/obs/robot0_gripper_qpos`
 - `data/demo_i/obs/object`
 
-
+有趣的是：老pipeline + 新export同样适用， 8 rollout， Success_Rate = 1.0，显著提升
 
 ---
 ## Two-Stage 
@@ -314,13 +325,6 @@ parsing_frames:
 
 - `repos/DemoGen/real_world/convert_robomimic_hdf5_to_zarr_exec_replay_h1_light.py`
 
-内容：
-
-- 从 `demo.hdf5 / low_dim.hdf5 / depth.hdf5` 读取原始轨迹和观测。
-- 保留原始 controller action，写到 zarr 里的 `data/action`。
-- 用 robosuite replay 标定前缀 action 的真实几何位移，写成 `data/replay_h1_delta`。
-- 同时生成 `state / agent_pos / point_cloud`。
-
 这一步和单物体线一致，source zarr 里字段：
 
 - `data/action`
@@ -342,7 +346,7 @@ parsing_frames:
 - 对每条 source episode，按 `skill1 / motion2 / skill2` 切出两段 motion：
   - `motion1 = [0, skill1)`
   - `motion2 = [motion2, skill2)`
-- 分别对这两段，用 segment sum 重建 one-stage 风格的 schedule。
+- 分别对这两段重建 schedule。
 
 ```text
 motion1 total_xyz = replay_h1_delta[0:skill1, :3].sum(axis=0)
@@ -350,8 +354,6 @@ motion2 total_xyz = replay_h1_delta[motion2:skill2, :3].sum(axis=0)
 ```
 
 每一段都按 old one-stage 规则重分配：
-
-- 默认不是线性插值
 - `z` 单独按 `z_step_size` 切固定小步。
 - 剩下帧数给 `xy` 平均分。
 - 最后顺序反过来：
@@ -363,16 +365,8 @@ motion2 total_xyz = replay_h1_delta[motion2:skill2, :3].sum(axis=0)
 - `motion1` 段重写 `data/motion_action[:skill1]`
 - `motion2` 段重写 `data/motion_action[motion2:skill2]`
 - `skill1 / skill2` 段保持 parent source zarr 的 `motion_action`
-- `data/action` 仍然保持 source demo 的 executable pulse action
+- `data/action` 仍然保持 source demo 的 pulse action
 
-双物体 schedule source zarr 里新增的语义：
-
-- `meta/skill1_frame_for_schedule`
-- `meta/motion2_frame_for_schedule`
-- `meta/skill2_frame_for_schedule`
-- `meta/motion1_total_xyz_per_episode`
-- `meta/motion2_total_xyz_per_episode`
-- `meta/motion_action_semantics = two_phase_pre_skill1_and_motion2_original_schedule_from_replay_calibrated_segment_sums_post_segments_parent_motion_action`
 
 ---
 
@@ -421,12 +415,11 @@ conda run -n demogen python -W ignore gen_demo.py \
 - 沿用 `stack` fork 名字，是通用的双物体 twostage fork。
 - 每条 generated sample 都先构造 reset state，再在 robosuite 里一步一步执行。
 
-双物体线里有两个老字段名：
+双物体线里的字段名：
 
 - `object_translation`
   - 在 twostage template 里仍然沿用这个字段名。
-  - 但它存的其实是双物体平移信息。
-  - 对支持双体平移的任务，语义是 6 维：`[object_xyz, target_xyz]`。
+  - 但它存的其实是双物体平移信息，语义是 6 维：`[object_xyz, target_xyz]`。
   -  `nutassemblyround` 配置里，后 3 维固定是 `0`。
 - `motion_frame_count`
   - 在 twostage 里沿用老名字。
@@ -438,7 +431,6 @@ generate 时的四段处理是：
 #### motion1
 
 - reset 时先按任务定义把 object / target 平移到新位置。
-- 当前 `nutassemblyround` 配置里，target 平移固定是 `0`。
 - 对 `motion1 = [0, skill1)`：
   - 从 source 里读 `motion_action`
   - 给它叠加一份 `object_translation` 的逐帧增量
