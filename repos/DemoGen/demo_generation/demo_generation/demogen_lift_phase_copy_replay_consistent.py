@@ -9,6 +9,7 @@ from tqdm import tqdm
 
 import diffusion_policies.env.robosuite.robosuite_wrapper as robosuite_wrapper
 from diffusion_policies.env.robosuite.robosuite_wrapper import Robosuite3DEnv
+from diffusion_policies.env.robosuite.dataset_meta import load_env_name_from_dataset
 
 from demo_generation.demogen_lift_phase_copy_exec_consistent import (
     LiftPhaseCopyExecConsistentDemoGen,
@@ -85,9 +86,7 @@ class LiftPhaseCopyReplayConsistentDemoGen(LiftPhaseCopyExecConsistentDemoGen):
 
     @staticmethod
     def _load_env_name(source_demo_hdf5: Path) -> str:
-        with h5py.File(source_demo_hdf5, "r") as f:
-            env_args = json.loads(f["data"].attrs["env_args"])
-        return env_args["env_name"].split("_")[0]
+        return load_env_name_from_dataset(source_demo_hdf5)
 
     def _load_reset_state(self, source_episode_idx: int):
         with h5py.File(self.source_demo_hdf5, "r") as f:

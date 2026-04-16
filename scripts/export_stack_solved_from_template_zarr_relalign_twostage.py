@@ -28,9 +28,14 @@ from export_stack_solved_from_template_zarr_relalign import (
     parse_episode_list,
     replay_full_episode,
 )
+from relalign_task_spec import (
+    apply_translation_to_reset_state,
+    capture_body_xyz,
+    load_relalign_env_name,
+    zero_translation_for_env,
+)
 from replay_zarr_episode import load_reset_state
 from solve_stack_motion1_relalign_actions import (
-    TASK_OBJECT_STATE_INDICES,
     build_desired_motion1_states,
     build_desired_relative_xyz,
     build_summary,
@@ -157,10 +162,10 @@ def build_desired_object_target_relative_xyz(
     )[None, :]
 
 
-def _capture_object_target_rel(env: Robosuite3DEnv) -> np.ndarray:
-    cubeA = np.asarray(env.env.sim.data.body_xpos[env.env.cubeA_body_id][:3], dtype=np.float32)
-    cubeB = np.asarray(env.env.sim.data.body_xpos[env.env.cubeB_body_id][:3], dtype=np.float32)
-    return cubeA - cubeB
+def _capture_object_target_rel(env: Robosuite3DEnv, env_name: str) -> np.ndarray:
+    object_xyz = capture_body_xyz(env, env_name, "object")
+    target_xyz = capture_body_xyz(env, env_name, "target")
+    return object_xyz - target_xyz
 
 
 def _relative_weight_at_step(
@@ -202,15 +207,13 @@ def solve_motion2_actions(
 ):
     robosuite_wrapper.N_CONTROL_STEPS = control_steps
     env = Robosuite3DEnv(str(source_demo_path), render=False)
+    env_name = env.task_name
     reset_state = load_reset_state(source_demo_path, source_episode_idx)
-    reset_state["states"] = np.asarray(reset_state["states"], dtype=np.float64).copy()
-    reset_state["states"][TASK_OBJECT_STATE_INDICES["Stack"]["object"]] += np.asarray(
-        object_translation[:3],
-        dtype=np.float64,
-    )
-    reset_state["states"][TASK_OBJECT_STATE_INDICES["Stack"]["target"]] += np.asarray(
-        target_translation[:3],
-        dtype=np.float64,
+    reset_state = apply_translation_to_reset_state(
+        reset_state=reset_state,
+        env_name=env_name,
+        object_translation=object_translation,
+        target_translation=target_translation,
     )
     obs = env.reset_to(reset_state)
 
@@ -221,7 +224,7 @@ def solve_motion2_actions(
         cands = candidate_xyzs()
         solved_actions = []
         observed_obs_xyz = [np.asarray(obs["agent_pos"][:3], dtype=np.float32).copy()]
-        observed_rel_xyz = [_capture_object_target_rel(env)]
+        observed_rel_xyz = [_capture_object_target_rel(env, env_name)]
         step_summaries = []
 
         for t in range(len(base_actions)):
@@ -246,7 +249,7 @@ def solve_motion2_actions(
                     raise RuntimeError("env.reset_to(states=...) did not return observation")
                 obs_next, _, _, _ = env.step(cand_action)
                 next_xyz = np.asarray(obs_next["agent_pos"][:3], dtype=np.float32)
-                next_rel = _capture_object_target_rel(env)
+                next_rel = _capture_object_target_rel(env, env_name)
 
                 pos_err = next_xyz - desired_next_xyz
                 pos_cost = float(np.dot(pos_err, pos_err))
@@ -271,7 +274,7 @@ def solve_motion2_actions(
             env.reset_to({"states": current_state})
             obs_next, _, _, _ = env.step(best["cand_action"])
             next_xyz = np.asarray(obs_next["agent_pos"][:3], dtype=np.float32)
-            next_rel = _capture_object_target_rel(env)
+            next_rel = _capture_object_target_rel(env, env_name)
 
             solved_actions.append(best["cand_action"].copy())
             observed_obs_xyz.append(next_xyz.copy())
@@ -310,6 +313,7 @@ def main():
 
     cfg = load_cfg(config_path, data_root)
     cfg.source_demo_hdf5 = str(source_demo_path)
+    env_name = load_relalign_env_name(source_demo_path)
     generator = instantiate_generator(cfg)
     template_meta = load_template_meta(template_zarr)
     template_buffer = ReplayBuffer.copy_from_path(
@@ -325,6 +329,8 @@ def main():
         source_episode_idx = int(template_meta["source_episode_idx"][gen_ep_idx])
         translation = np.asarray(template_meta["object_translation"][gen_ep_idx], dtype=np.float32)
         object_translation, target_translation = split_translation(translation)
+        if target_translation is None:
+            target_translation = zero_translation_for_env(env_name)[:3]
         motion_frame_count = int(template_meta["motion_frame_count"][gen_ep_idx])
 
         source_demo = generator.replay_buffer.get_episode(source_episode_idx)

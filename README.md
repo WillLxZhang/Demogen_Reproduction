@@ -1,6 +1,6 @@
 [TOC]
-# Pipeline New
-## 原文内容
+
+# 原文内容
 * Pick-Cube、Handle-Press 是单物体空间随机化任务；Stack-Cube 是双物体任务。
 * 原文设置里，单物体任务从 1 条 source demonstration 生成 100 条空间增广 demonstrations；双物体任务因为初始配置组合更多，会生成 200 条 demonstrations。
 
@@ -12,9 +12,12 @@
 * 遗留问题：单视角观测下的 visual mismatch：随着物体在三维空间中移动，其可见外观和透视关系会发生变化，但合成点云仍保留 source demonstration 中的固定视角外观，因此 synthetic data 与真实观测之间存在偏差。
 
 * 论文在 Pick-Cube 上进一步发现，当增广数据的空间覆盖或密度继续增加时，性能提升会逐渐饱和。
+# Pipeline One-Stage New
+## One-Stage
 
 
-## 数据语义
+
+### 数据语义
 
 ```
 selected4 demo / low_dim / depth
@@ -27,48 +30,48 @@ selected4 demo / low_dim / depth
 -> robomimic train
 ```
 
-### source zarr
+#### source zarr
 
 - 作用：给 DemoGen 提供 source 轨迹。
 - 核心：同时保留执行 action 和 replay 标定出来的几何 motion。
 
-### schedule source zarr
+#### schedule source zarr
 
 - 作用：把 generate 要参考的 `motion_action` 整理出来。
 - 核心：前缀 `motion_action` 用 replay 标定过的 schedule。
 
-### generated zarr
+#### generated zarr
 
 - 作用：做空间增广，产出 template。
 - 核心：写出来的 `state/action/point_cloud` 能对上 replay。
 
-### solved zarr
+#### solved zarr
 
 - 作用：把模板轨迹修到任务成功，再把真实 replay 结果写回。
 - 核心：这是最终训练候选。
 
-### replayobs low_dim.hdf5
+#### replayobs low_dim.hdf5
 
 - 作用：把 solved zarr 回导成 robomimic 训练集。
 - 核心：generated demo 的 `object obs` 来自 replay 真值。
 
 ---
 
-## 1. 输入
+### 1. 输入
 - source demo：
 - source low_dim：
 - source depth
 
 ---
 
-## 2. source
+### 2. source
 
 新线的 source 分两步：
 
 1. `raw hdf5 -> replayh1 light source zarr`
 2. `light source zarr -> schedule source zarr`
 
-### 2.1 replayh1 light source
+#### 2.1 replayh1 light source
 
 脚本：
 
@@ -94,7 +97,7 @@ source zarr 里字段：
 
 ---
 
-### 2.2 schedule source
+#### 2.2 schedule source
 
 脚本：
 
@@ -122,7 +125,7 @@ source zarr 里字段：
 
 ---
 
-## 3. generate
+### 3. generate
 配置文件：
 
 - `repos/DemoGen/demo_generation/demo_generation/config/lift_0_v37_replayh1_light_schedule_phasecopy_replayconsistent_selected4_d2467_diagfix.yaml`
@@ -158,7 +161,7 @@ template zarr：
 
 ---
 
-## 4. solve
+### 4. solve
 
 脚本：
 - `scripts/export_lift_solved_from_template_zarr_relalign.py`
@@ -201,26 +204,26 @@ conda run -n demogen python scripts/export_lift_solved_from_template_zarr_relali
  
 ---
 
-## 5. gate
+### 5. gate
 
 
 1. consistency
 2. success
 
-### consistency
+#### consistency
 脚本：
 - `scripts/validate_generated_zarr_consistency.py`
   - 用 zarr 里的 action 在 robosuite 里重放。
   - 对比 replay 出来的轨迹和 zarr 里保存的轨迹。
   - 检查这份 solved zarr 的 `state/action` 是否自洽。
 
-### success
+#### success
 脚本：
 - `scripts/eval_generated_zarr_success_rate.py`
   - 直接在 robosuite 里评估 solved zarr 的任务成功率。
 
 ---
-## 6. exportobs
+### 6. exportobs
 
 脚本：
 - `repos/DemoGen/real_world/export_demogen_zarr_to_robomimic_lowdim_replayobs.py`
@@ -261,18 +264,434 @@ conda run -n demogen python repos/DemoGen/real_world/export_demogen_zarr_to_robo
 - `data/demo_i/obs/robot0_gripper_qpos`
 - `data/demo_i/obs/object`
 
+
+
+---
+## Two-Stage 
+
+* 双物体支线：
+  * 两段 motion：`motion1`、`motion2`
+  * 两段 skill：`skill1`、`skill2`
+  * 两类相对约束：`eef-object`、`object-target`
+
+---
+
+### 1. 输入
+
+- source demo：
+- source low_dim：
+- source depth
+- parsing frames：
+  - `skill-1`
+  - `motion-2`
+  - `skill-2`
+
+配置：
+
+```yaml
+parsing_frames:
+  motion-1: 0
+  skill-1: [400, 550, 340, 415]
+  motion-2: [500, 700, 470, 480]
+  skill-2: [860, 960, 800, 860]
+```
+
+- `motion1 = [0, skill1)`
+- `skill1 = [skill1, motion2)`
+- `motion2 = [motion2, skill2)`
+- `skill2 = [skill2, end)`
+
+---
+
+### 2. source
+
+1. `raw hdf5 -> replayh1 light source zarr`
+2. `light source zarr -> twostage schedule source zarr`
+
+#### 2.1 replayh1 light source
+
+脚本：
+
+- `repos/DemoGen/real_world/convert_robomimic_hdf5_to_zarr_exec_replay_h1_light.py`
+
+内容：
+
+- 从 `demo.hdf5 / low_dim.hdf5 / depth.hdf5` 读取原始轨迹和观测。
+- 保留原始 controller action，写到 zarr 里的 `data/action`。
+- 用 robosuite replay 标定前缀 action 的真实几何位移，写成 `data/replay_h1_delta`。
+- 同时生成 `state / agent_pos / point_cloud`。
+
+这一步和单物体线一致，source zarr 里字段：
+
+- `data/action`
+- `data/replay_h1_delta`
+- `data/state`
+- `data/point_cloud`
+
+---
+
+#### 2.2 twostage schedule source
+
+脚本：
+
+- `repos/DemoGen/real_world/convert_source_zarr_twophase_schedule_replay_h1.py`
+
+内容：
+
+- 读取上一步的 source zarr。
+- 对每条 source episode，按 `skill1 / motion2 / skill2` 切出两段 motion：
+  - `motion1 = [0, skill1)`
+  - `motion2 = [motion2, skill2)`
+- 分别对这两段，用 segment sum 重建 one-stage 风格的 schedule。
+
+```text
+motion1 total_xyz = replay_h1_delta[0:skill1, :3].sum(axis=0)
+motion2 total_xyz = replay_h1_delta[motion2:skill2, :3].sum(axis=0)
+```
+
+每一段都按 old one-stage 规则重分配：
+
+- 默认不是线性插值
+- `z` 单独按 `z_step_size` 切固定小步。
+- 剩下帧数给 `xy` 平均分。
+- 最后顺序反过来：
+  - 前面先走 `xy`
+  - 后面几帧再走 `z`
+
+写回：
+
+- `motion1` 段重写 `data/motion_action[:skill1]`
+- `motion2` 段重写 `data/motion_action[motion2:skill2]`
+- `skill1 / skill2` 段保持 parent source zarr 的 `motion_action`
+- `data/action` 仍然保持 source demo 的 executable pulse action
+
+双物体 schedule source zarr 里新增的语义：
+
+- `meta/skill1_frame_for_schedule`
+- `meta/motion2_frame_for_schedule`
+- `meta/skill2_frame_for_schedule`
+- `meta/motion1_total_xyz_per_episode`
+- `meta/motion2_total_xyz_per_episode`
+- `meta/motion_action_semantics = two_phase_pre_skill1_and_motion2_original_schedule_from_replay_calibrated_segment_sums_post_segments_parent_motion_action`
+
+---
+
+### 3. generate
+
+配置文件：
+
+- `repos/DemoGen/demo_generation/demo_generation/config/nutassemblyround_0_v1_replayh1_twostage_selected4.yaml`
+
+source 命令：
+
+```bash
+cd /home/willzhang/Science/Reproduction/Reproduction
+
+conda run -n demogen python scripts/run_twostage_raw_hdf5_pipeline.py \
+  --config repos/DemoGen/demo_generation/demo_generation/config/nutassemblyround_0_v1_replayh1_twostage_selected4.yaml \
+  --raw-demo-hdf5 /home/willzhang/Science/Reproduction/Reproduction/data/raw/nutassemblyround_0/1776068238_0811434/demo.hdf5 \
+  --selected-episodes 0,1,2,3 \
+  --data-root /home/willzhang/Science/Reproduction/Reproduction/data \
+  --selected-demo-hdf5 /home/willzhang/Science/Reproduction/Reproduction/data/raw/nutassemblyround_0/1776068238_0811434/demo_selected4.hdf5 \
+  --low-dim-hdf5 /home/willzhang/Science/Reproduction/Reproduction/data/raw/nutassemblyround_0/1776068238_0811434/low_dim_selected4.hdf5 \
+  --depth-hdf5 /home/willzhang/Science/Reproduction/Reproduction/data/raw/nutassemblyround_0/1776068238_0811434/depth_selected4.hdf5 \
+  --overwrite
+```
+
+generate 命令：
+
+```bash
+cd /home/willzhang/Science/Reproduction/Reproduction/repos/DemoGen/demo_generation
+
+conda run -n demogen python -W ignore gen_demo.py \
+  --config-name=nutassemblyround_0_v1_replayh1_twostage_selected4.yaml \
+  data_root=/home/willzhang/Science/Reproduction/Reproduction/data \
+  source_name=nutassemblyround_0_v1_replayh1_twostage_source_selected4 \
+  source_demo_hdf5=/home/willzhang/Science/Reproduction/Reproduction/data/raw/nutassemblyround_0/1776068238_0811434/demo_selected4.hdf5 \
+  generated_name=nutassemblyround_0_v1_replayh1_twostage_selected4 \
+  generation.range_name=test \
+  generation.mode=grid \
+  generation.n_gen_per_source=25 \
+  generation.render_video=False
+```
+
+内容：
+
+- 生成器： `StackPhaseCopyReplayConsistentDemoGen`。
+- 沿用 `stack` fork 名字，是通用的双物体 twostage fork。
+- 每条 generated sample 都先构造 reset state，再在 robosuite 里一步一步执行。
+
+双物体线里有两个老字段名：
+
+- `object_translation`
+  - 在 twostage template 里仍然沿用这个字段名。
+  - 但它存的其实是双物体平移信息。
+  - 对支持双体平移的任务，语义是 6 维：`[object_xyz, target_xyz]`。
+  -  `nutassemblyround` 配置里，后 3 维固定是 `0`。
+- `motion_frame_count`
+  - 在 twostage 里沿用老名字。
+  - 但它实际存的是 `skill1_frame`，也就是第一段 motion 的结束帧。
+  - 第二段边界单独写在 `motion_2_frame` 和 `skill_2_frame`。
+
+generate 时的四段处理是：
+
+#### motion1
+
+- reset 时先按任务定义把 object / target 平移到新位置。
+- 当前 `nutassemblyround` 配置里，target 平移固定是 `0`。
+- 对 `motion1 = [0, skill1)`：
+  - 从 source 里读 `motion_action`
+  - 给它叠加一份 `object_translation` 的逐帧增量
+  - 再编码回 executable pulse action
+- point cloud 渲染时：
+  - object 平移 `obj_trans_vec`
+  - target 平移 `tar_trans_vec`
+  - robot 按 replay 出来的 `robot_trans_vec` 平移
+
+#### skill1
+
+- `skill1 = [skill1, motion2)` 直接 copy source executable action。
+- 这一段不再额外加 motion schedule。
+- point cloud 语义变成：
+  - target 单独按 `tar_trans_vec` 平移
+  - object 和 robot 跟随当前 replay 的 `robot_trans_vec`
+
+#### motion2
+
+- `motion2 = [motion2, skill2)` 再做一次 motion 增广。
+- 这次加：`target_translation - object_translation`，也就是补“从当前 object 偏移，走到 target 偏移”这段相对位移。
+- point cloud 语义和 `skill1` 一样：
+  - target 单独按 `tar_trans_vec`
+  - object 和 robot 跟随 replay 的 `robot_trans_vec`
+
+#### skill2
+
+- `skill2 = [skill2, end)` 继续 copy source executable action。
+- point cloud 直接整体按 `tar_trans_vec` 平移。
+
+template zarr 里写回这些 meta：
+
+- `source_episode_idx`
+- `object_translation`
+- `motion_frame_count`
+- `motion_2_frame`
+- `skill_2_frame`
+
+template ：
+
+- `state/action/point_cloud` 都是按 robosuite replay 过程写出来的。
+- 但两段 motion 的 action 仍然只是 template action，不保证任务最终成功。
+
+---
+
+### 4. solve
+
+脚本：
+
+- `scripts/export_stack_solved_from_template_zarr_relalign_twostage.py`
+
+命令：
+
+```bash
+cd /home/willzhang/Science/Reproduction/Reproduction
+
+conda run -n demogen python scripts/export_stack_solved_from_template_zarr_relalign_twostage.py \
+  --config repos/DemoGen/demo_generation/demo_generation/config/nutassemblyround_0_v1_replayh1_twostage_selected4.yaml \
+  --data-root /home/willzhang/Science/Reproduction/Reproduction/data \
+  --source-demo /home/willzhang/Science/Reproduction/Reproduction/data/raw/nutassemblyround_0/1776068238_0811434/demo_selected4.hdf5 \
+  --template-zarr /home/willzhang/Science/Reproduction/Reproduction/data/datasets/generated/nutassemblyround_0_v1_replayh1_twostage_selected4_test_25.zarr \
+  --episodes all \
+  --control-steps 1 \
+  --action-deviation-weight 1e-4 \
+  --motion1-relative-tail-steps 40 \
+  --motion1-relative-cost-weight 4.0 \
+  --motion2-relative-tail-steps 40 \
+  --motion2-relative-cost-weight 4.0 \
+  --output-zarr /home/willzhang/Science/Reproduction/Reproduction/outputs/generated/nutassemblyround_0_v1_replayh1_twostage_selected4_relalign_twostage_all.zarr \
+  --output-json /home/willzhang/Science/Reproduction/Reproduction/outputs/analysis/nutassemblyround_0_v1_replayh1_twostage_selected4_relalign_twostage_all.json
+```
+
+内容：
+- 逐条读取 template zarr 里的：
+  - `source_episode_idx`
+  - `object_translation`
+  - `motion_frame_count`
+  - `motion_2_frame`
+  - `skill_2_frame`
+- 然后把 `object_translation` 先拆开：
+  - `object_translation`
+  - `target_translation`
+
+双物体 2 次 solve 完：
+
+#### 4.1 solve motion1
+
+- `motion1` 的目标轨迹来自：
+  - source `state[:3]`
+  - 再加上 `object_translation` 在 `[0, skill1)` 上的累积增量
+- 候选 action 还是在 robosuite 里逐步前向模拟选出来。
+- cost 里有三项：
+  - `eef xyz` 对 template 目标的误差
+  - `eef-object relative xyz` 对 source reference 的误差
+  - 偏离 template action 的代价
+- 其中 `eef-object` 约束只在尾窗里逐渐加权：
+  - `tail_start = solve_steps - motion1_relative_tail_steps`
+  - 越靠近第一段 motion 末尾，relative cost 权重越大
+
+即：
+- 前面主要先把末端几何轨迹拉回去
+- 到临近抓取时，再把 `eef` 相对 object 的关系收紧
+
+#### 4.2 solve motion2
+
+- 先把 `motion1` solve 好的 action 当作 prefix replay 到 `motion2` 起点。
+- `motion2` 的目标轨迹来自：
+  - source 在 `[motion2, skill2)` 上的 `state[:3]`
+  - 再加上当前 object offset
+- 这里的 `current_object_offset` 不是常数，而是：
+
+```text
+object_translation
++ cumulative(target_translation - object_translation)
+```
+
+- 第二段 cost 里的 relative 约束换成：
+  - `object-target relative xyz`
+- 同样只在尾窗里逐渐加权：
+  - `tail_start = solve_steps - motion2_relative_tail_steps`
+
+这里的意思是：
+
+- 第一段解决“抓到 object”
+- 第二段解决“把 object 带到 target 上”
+
+#### 4.3 replay 写回
+
+- 两段 solve 完之后，把整条 full action 再在 robosuite 里 replay 一遍。
+- 最后把 replay 出来的真实：
+  - `state`
+  - `action`
+  - `point_cloud`
+  重写回 zarr。
+
+---
+
+### 5. gate
+
+---
+
+### 6. exportobs
+
+脚本：
+
+- `repos/DemoGen/real_world/export_demogen_zarr_to_robomimic_lowdim_replayobs_twophase.py`
+
+命令：
+
+```bash
+cd /home/willzhang/Science/Reproduction/Reproduction
+
+conda run -n demogen python repos/DemoGen/real_world/export_demogen_zarr_to_robomimic_lowdim_replayobs_twophase.py \
+  --generated-zarr /home/willzhang/Science/Reproduction/Reproduction/outputs/generated/nutassemblyround_0_v1_replayh1_twostage_selected4_relalign_twostage_all.zarr \
+  --source-low-dim-hdf5 /home/willzhang/Science/Reproduction/Reproduction/data/raw/nutassemblyround_0/1776068238_0811434/low_dim_selected4.hdf5 \
+  --output-hdf5 /home/willzhang/Science/Reproduction/Reproduction/outputs/robomimic/nutassemblyround_0_v1_replayh1_twostage_selected4_relalign_twostage_replayobs_lowdim.hdf5 \
+  --include-source-demos \
+  --control-steps 1 \
+  --overwrite
+```
+
+内容：
+
+- 读取 solved zarr 的每条 episode。
+- 先把 `object_translation` 拆成：
+  - `object_translation`
+  - `target_translation`
+- 用 `source episode + translation` 构造 reset state。
+- 在 robosuite 里重新 replay 整条 generated action。
+- 每一帧读取 low-dim 观测：
+  - `robot0_eef_pos`
+  - `robot0_eef_quat`
+  - `robot0_gripper_qpos`
+  - `object`
+
+这里双物体线和单物体线的区别是：
+
+- reset 不再只是平移一个 object。
+- replayobs exporter 会按任务定义把 object / target translation 都应用到 reset state。
+- 导出的 `obs/object` 是双物体 reset 下 replay 出来的真值。
+
+最后得到 robomimic 标准训练格式：
+
+- `data/demo_i/actions`
+- `data/demo_i/obs/robot0_eef_pos`
+- `data/demo_i/obs/robot0_eef_quat`
+- `data/demo_i/obs/robot0_gripper_qpos`
+- `data/demo_i/obs/object`
+
+---
+
 ## Eval
-原文的eval为3*seed 随机roll 每seed20，这里使用相同配置
-### Lift Cube
+结合仓库默认配置与论文原文，eval为3*seed 随机roll 每seed20，这里使用相同配置
+
+项目页写： “DemoGen 的有效性已在 8 个改进的 MetaWorld 任务上得到验证，这些任务扩大了对象随机化范围。我们报告了在DemoGen生成的数据集上训练的视觉运动策略在 3 个种子点上的最大/平均成功率，每个任务仅使用一个 源演示。结果表明，DemoGen能够在数据收集所需人力减少 20 倍以上的情况下，保持策略的性能。”泛化结论来自未见配置上的测试，不仅限于 source demo 的初始场景。
+
+
+default-reset：
+- 评估时走 `env.reset()`，回到环境自己的 canonical 初始场景 / 初始布局。和训练数据里的 source-demo 初始分布不一致。
+
+新增 custom-reset，用来检测模型有没有学到训练集里的特征：
+- 评估时用 `source demo` 的orientation，并且在训练集的总范围内采样，重建初始场景，有平移时再叠加对应 translation。
+
+
+### One-Stage -- Lift / Press Handle
+#### Lift Cube
 随机3 Seed / 20 rollout 测试中
 - 4-100 相比原文 100 取得 65% / 成功率；单seed roll取得最高 80% 成功率
 - 9-153取得 95% / 91.6% 成功率
 
-### Presss Handle
+#### Presss Handle
 - 4-100 训中70pth roll*10  成功率100% 
 - 3*seed 20roll 成功率100/100，和原文相符
-### Stack Cube Task
-- 转回lowdim的观测replay正常，正在排查原因
+
+
+### TwoStage -- Stack Cube Task / NutAssembly Task
+本质上是双物体的Pick & Place
+- stack任务采取1-81的配置（移动object&target的位置）
+- nut任务采取4-100的配置（仅移动object位置）
+
+Stack & Nut 在default上均成功率很低，只有0.1-0.2：
+- Default Reset上仅能实现0.1左右成功率
+- Custom Reset 上实现0.9成功率，说明对训练集内涵盖、中间情况等内容分布较好
+
+结论：说明lift和press实现了一定程度的泛化 而 stack/nut 在目前配置下位置泛化能力存在，一旦改变位姿朝向，姿态泛化就几乎为0，正在排查原因
+- 直到export回robomimic的hdf5回放也是正常的，并且能够取得分部内的成功，说明数据导出不是最主要原因
+
+### 疑惑
+条件铺垫：
+- Demogen的数据增广仅涵盖平移，未涵盖xy内位姿的变化
+- 在做One-StageLift任务时，数据增广量从4-100跃升至9-153时，成功率从65%升至95%。
+- Press这类简单任务（Door的姿态不变化，仅位置变化），4-100足以cover100%成功率
+- 在录制Demo/default-reset的配置下均为随机初始化
+这说明原始情况下位姿的变化能够显著帮助模型训练效果的提升
+
+疑惑：如果说DP对分布外的场景的泛化能力来自于插值（待验证），那么为什么原文的效果就是比我们的好？
+
+### 分析误差来源
+
+1. 原文 source demo 是 scripted，本repo是键盘录的 demo。
+- 原文是 scripted policies，准备 1 条 source demo，再生成 100 / 200 条 synthetic demos；10/25 source 的 human-collected 对照也是拿 scripted policy 当参考采的。
+
+- 本地是人手 demo，再手工切 motion/skill。scripted policy 的 demo 更平滑、分段清楚，没有犹豫、抖动、补救动作。
+
+2. 原文双物体 200 不是 grid
+two-object generator，如果是 grid 里动，n_gen_per_source 必须是四次方。论文：双物体任务生成 200 条 demos，不是四次方，推测为 random sampling 生成器。理论上可以覆盖更加多的位置分布。（待求证）
+
+3. convert*2-generate-solve-export 的累积误差
+
+4. 原文数据量更大
+ 
+5. 把 4 条坏 solve 删掉，效果反而更差，说明主因是上述全局的因素
+
 
 ---
 
@@ -287,9 +706,6 @@ conda run -n demogen python repos/DemoGen/real_world/export_demogen_zarr_to_robo
 
 - `robomimic`
   - 训练 policy、做 rollout 、评测。
-
-
-
 
 ---
 

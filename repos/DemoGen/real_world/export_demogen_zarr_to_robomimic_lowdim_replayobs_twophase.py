@@ -22,8 +22,11 @@ import zarr
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DIFFUSION_POLICIES_ROOT = REPO_ROOT / "diffusion_policies"
+SCRIPTS_ROOT = Path(__file__).resolve().parents[3] / "scripts"
 if str(DIFFUSION_POLICIES_ROOT) not in sys.path:
     sys.path.insert(0, str(DIFFUSION_POLICIES_ROOT))
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
 
 import diffusion_policies.env.robosuite.robosuite_wrapper as robosuite_wrapper
 from diffusion_policies.env.robosuite.robosuite_wrapper import Robosuite3DEnv
@@ -37,18 +40,11 @@ from export_demogen_zarr_to_robomimic_lowdim_replayobs import (
     sorted_demo_keys,
     write_episode,
 )
-
-
-TASK_OBJECT_STATE_INDICES = {
-    "Lift": {
-        "object": np.array([10, 11, 12], dtype=np.int64),
-        "target": None,
-    },
-    "Stack": {
-        "object": np.array([10, 11, 12], dtype=np.int64),
-        "target": np.array([17, 18, 19], dtype=np.int64),
-    },
-}
+from relalign_task_spec import (
+    apply_translation_to_reset_state as apply_relalign_translation,
+    split_translation,
+    zero_translation_for_env,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -92,25 +88,6 @@ def parse_args() -> argparse.Namespace:
         help="Internal robosuite control repeats to use when replaying generated episodes.",
     )
     return parser.parse_args()
-
-
-def split_translation(raw: np.ndarray | None) -> tuple[np.ndarray | None, np.ndarray | None]:
-    if raw is None:
-        return None, None
-    arr = np.asarray(raw, dtype=np.float32).reshape(-1)
-    if arr.shape == (3,):
-        return arr, None
-    if arr.shape == (6,):
-        return arr[:3], arr[3:6]
-    raise ValueError(f"Expected translation shape (3,) or (6,), got {arr.shape}")
-
-
-def zero_translation_for_env(env_name: str) -> np.ndarray:
-    if env_name == "Stack":
-        return np.zeros(6, dtype=np.float32)
-    return np.zeros(3, dtype=np.float32)
-
-
 def apply_translation_to_reset_state(
     *,
     reset_state: dict,
@@ -118,27 +95,12 @@ def apply_translation_to_reset_state(
     object_translation: np.ndarray | None,
     target_translation: np.ndarray | None,
 ) -> dict:
-    indices_cfg = TASK_OBJECT_STATE_INDICES.get(env_name)
-    if indices_cfg is None:
-        if object_translation is None and target_translation is None:
-            return dict(reset_state)
-        raise NotImplementedError(
-            f"Replay-based generated obs export is not implemented for env '{env_name}'. "
-            "Add task-specific object state indices before exporting generated translations."
-        )
-
-    translated = dict(reset_state)
-    translated["states"] = np.asarray(reset_state["states"], dtype=np.float64).copy()
-
-    if object_translation is not None and indices_cfg.get("object") is not None:
-        idx = np.asarray(indices_cfg["object"], dtype=np.int64)
-        translated["states"][idx] += np.asarray(object_translation[: len(idx)], dtype=np.float64)
-
-    if target_translation is not None and indices_cfg.get("target") is not None:
-        idx = np.asarray(indices_cfg["target"], dtype=np.int64)
-        translated["states"][idx] += np.asarray(target_translation[: len(idx)], dtype=np.float64)
-
-    return translated
+    return apply_relalign_translation(
+        reset_state=reset_state,
+        env_name=env_name,
+        object_translation=object_translation,
+        target_translation=target_translation,
+    )
 
 
 def build_generated_obs_replay(

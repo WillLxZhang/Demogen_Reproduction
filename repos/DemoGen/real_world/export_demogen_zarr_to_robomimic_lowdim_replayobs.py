@@ -40,6 +40,7 @@ if str(DIFFUSION_POLICIES_ROOT) not in sys.path:
 
 import diffusion_policies.env.robosuite.robosuite_wrapper as robosuite_wrapper
 from diffusion_policies.env.robosuite.robosuite_wrapper import Robosuite3DEnv
+from diffusion_policies.env.robosuite.dataset_meta import load_env_name_from_dataset
 
 
 # Keep this aligned with the source-zarr conversion scripts.
@@ -179,9 +180,7 @@ def build_generated_obs_approx(
 
 
 def load_env_name(dataset_path: Path) -> str:
-    with h5py.File(dataset_path, "r") as f:
-        env_args = json.loads(f["data"].attrs["env_args"])
-    return str(env_args["env_name"]).split("_")[0]
+    return load_env_name_from_dataset(dataset_path)
 
 
 def build_reset_state(source_episode_group: h5py.Group) -> dict:

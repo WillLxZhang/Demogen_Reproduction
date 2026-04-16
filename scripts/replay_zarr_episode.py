@@ -18,6 +18,7 @@ if str(DIFFUSION_POLICIES_ROOT) not in sys.path:
     sys.path.insert(0, str(DIFFUSION_POLICIES_ROOT))
 
 from diffusion_policies.common.replay_buffer import ReplayBuffer
+from diffusion_policies.env.robosuite.dataset_meta import load_env_name_from_dataset
 import diffusion_policies.env.robosuite.robosuite_wrapper as robosuite_wrapper
 from diffusion_policies.env.robosuite.robosuite_wrapper import Robosuite3DEnv
 
@@ -115,9 +116,7 @@ def load_reset_state(source_demo_path: Path, source_episode_idx: int) -> dict:
 
 
 def load_env_name(source_demo_path: Path) -> str:
-    with h5py.File(source_demo_path, "r") as f:
-        env_args = json.loads(f["data"].attrs["env_args"])
-    return env_args["env_name"].split("_")[0]
+    return load_env_name_from_dataset(source_demo_path)
 
 
 def load_generated_episode_meta(zarr_path: Path, episode_idx: int) -> dict:

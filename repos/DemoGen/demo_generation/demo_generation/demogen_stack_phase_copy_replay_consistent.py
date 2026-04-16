@@ -10,6 +10,7 @@ from tqdm import tqdm
 
 import diffusion_policies.env.robosuite.robosuite_wrapper as robosuite_wrapper
 from diffusion_policies.env.robosuite.robosuite_wrapper import Robosuite3DEnv
+from diffusion_policies.env.robosuite.dataset_meta import load_env_name_from_dataset
 
 from demo_generation.demogen_lift_phase_copy_exec_consistent import (
     LiftPhaseCopyExecConsistentDemoGen,
@@ -78,12 +79,16 @@ class StackPhaseCopyReplayConsistentDemoGen(LiftPhaseCopyExecConsistentDemoGen):
         )
 
         self.source_demo_keys = self._list_demo_keys(self.source_demo_hdf5)
+        self.grid_components = self._resolve_grid_components(
+            getattr(getattr(cfg, "generation", None), "grid_components", None)
+        )
 
         cprint(
             (
                 "Stack replay-consistent fork: "
                 f"source_demo_hdf5={self.source_demo_hdf5}, "
                 f"source_control_steps={self.source_control_steps}, "
+                f"grid_components={list(self.grid_components)}, "
                 f"object_state_indices={None if self.replay_object_state_indices is None else self.replay_object_state_indices.tolist()}, "
                 f"target_state_indices={None if self.replay_target_state_indices is None else self.replay_target_state_indices.tolist()}"
             ),
@@ -111,15 +116,96 @@ class StackPhaseCopyReplayConsistentDemoGen(LiftPhaseCopyExecConsistentDemoGen):
         return np.asarray(raw, dtype=np.int64)
 
     @staticmethod
+    def _resolve_grid_components(raw):
+        if raw is None:
+            return ("object", "target")
+        comps = tuple(str(item) for item in raw)
+        if not comps:
+            raise ValueError("generation.grid_components must not be empty")
+        invalid = sorted(set(comps) - {"object", "target"})
+        if invalid:
+            raise ValueError(
+                f"generation.grid_components contains unsupported entries: {invalid}"
+            )
+        if len(set(comps)) != len(comps):
+            raise ValueError(
+                f"generation.grid_components must not contain duplicates: {list(comps)}"
+            )
+        return comps
+
+    @staticmethod
     def _list_demo_keys(source_demo_hdf5: Path):
         with h5py.File(source_demo_hdf5, "r") as f:
             return list(f["data"].keys())
 
     @staticmethod
     def _load_env_name(source_demo_hdf5: Path) -> str:
-        with h5py.File(source_demo_hdf5, "r") as f:
-            env_args = json.loads(f["data"].attrs["env_args"])
-        return env_args["env_name"].split("_")[0]
+        return load_env_name_from_dataset(source_demo_hdf5)
+
+    @staticmethod
+    def _zero_translation():
+        return np.zeros(3, dtype=np.float32)
+
+    def _sample_component_translation(self, component: str, n_demos: int, mode: str):
+        if component == "object":
+            return self.generate_trans_vectors(self.object_trans_range, n_demos, mode=mode)
+        if component == "target":
+            return self.generate_trans_vectors(self.target_trans_range, n_demos, mode=mode)
+        raise ValueError(f"Unsupported translation component: {component}")
+
+    def _build_translation_vectors(self, n_demos: int, gen_mode: str):
+        trans_vectors = []
+        active_components = set(self.grid_components)
+
+        if gen_mode == "random":
+            for _ in range(n_demos):
+                obj_xyz = (
+                    self._sample_component_translation("object", 1, mode="random")[0]
+                    if "object" in active_components
+                    else self._zero_translation()
+                )
+                targ_xyz = (
+                    self._sample_component_translation("target", 1, mode="random")[0]
+                    if "target" in active_components
+                    else self._zero_translation()
+                )
+                trans_vectors.append(np.concatenate([obj_xyz, targ_xyz], axis=0))
+            return trans_vectors
+
+        if gen_mode != "grid":
+            raise NotImplementedError
+
+        if active_components == {"object", "target"}:
+            fourth_roots = np.power(n_demos, 1 / 4)
+            if not np.isclose(fourth_roots, np.round(fourth_roots)):
+                raise ValueError(
+                    "In two-component grid mode, n_demos must be a fourth power"
+                )
+            sqrt_n_demos = int(np.sqrt(n_demos))
+            obj_xyz = self._sample_component_translation("object", sqrt_n_demos, mode="grid")
+            targ_xyz = self._sample_component_translation("target", sqrt_n_demos, mode="grid")
+            for o_xyz in obj_xyz:
+                for t_xyz in targ_xyz:
+                    trans_vectors.append(np.concatenate([o_xyz, t_xyz], axis=0))
+            return trans_vectors
+
+        if len(active_components) != 1:
+            raise ValueError(
+                f"Unsupported generation.grid_components={list(self.grid_components)}"
+            )
+
+        active_component = self.grid_components[0]
+        square_root = np.sqrt(n_demos)
+        if not np.isclose(square_root, np.round(square_root)) or int(n_demos) <= 1:
+            raise ValueError(
+                "In single-component grid mode, n_demos must be a squared number larger than 1"
+            )
+        active_xyz = self._sample_component_translation(active_component, n_demos, mode="grid")
+        for xyz in active_xyz:
+            obj_xyz = xyz if active_component == "object" else self._zero_translation()
+            targ_xyz = xyz if active_component == "target" else self._zero_translation()
+            trans_vectors.append(np.concatenate([obj_xyz, targ_xyz], axis=0))
+        return trans_vectors
 
     def _load_reset_state(self, source_episode_idx: int):
         with h5py.File(self.source_demo_hdf5, "r") as f:
@@ -326,26 +412,7 @@ class StackPhaseCopyReplayConsistentDemoGen(LiftPhaseCopyExecConsistentDemoGen):
         zarr_meta.attrs["task_stage_semantics"] = "two_phase_motion1_skill1_motion2_skill2"
 
     def two_stage_augment(self, n_demos, render_video=False, gen_mode="random"):
-        trans_vectors = []
-        if gen_mode == "random":
-            for _ in range(n_demos):
-                obj_xyz = self.generate_trans_vectors(self.object_trans_range, 1, mode="random")[0]
-                targ_xyz = self.generate_trans_vectors(self.target_trans_range, 1, mode="random")[0]
-                trans_vectors.append(np.concatenate([obj_xyz, targ_xyz], axis=0))
-        elif gen_mode == "grid":
-            def check_fourth_power(arr):
-                fourth_roots = np.power(arr, 1 / 4)
-                return np.isclose(fourth_roots, np.round(fourth_roots))
-
-            assert check_fourth_power(n_demos), "n_demos must be a fourth power"
-            sqrt_n_demos = int(np.sqrt(n_demos))
-            obj_xyz = self.generate_trans_vectors(self.object_trans_range, sqrt_n_demos, mode="grid")
-            targ_xyz = self.generate_trans_vectors(self.target_trans_range, sqrt_n_demos, mode="grid")
-            for o_xyz in obj_xyz:
-                for t_xyz in targ_xyz:
-                    trans_vectors.append(np.concatenate([o_xyz, t_xyz], axis=0))
-        else:
-            raise NotImplementedError
+        trans_vectors = self._build_translation_vectors(int(n_demos), gen_mode)
 
         generated_episodes = []
 
@@ -375,9 +442,9 @@ class StackPhaseCopyReplayConsistentDemoGen(LiftPhaseCopyExecConsistentDemoGen):
                 pcds = source_demo["point_cloud"]
 
                 if self.use_manual_parsing_frames:
-                    skill_1_frame = int(self.parsing_frames["skill-1"])
-                    motion_2_frame = int(self.parsing_frames["motion-2"])
-                    skill_2_frame = int(self.parsing_frames["skill-2"])
+                    skill_1_frame = self.resolve_parsing_frame("skill-1", i)
+                    motion_2_frame = self.resolve_parsing_frame("motion-2", i)
+                    skill_2_frame = self.resolve_parsing_frame("skill-2", i)
                 else:
                     ee_poses = source_demo["state"][:, :3]
                     skill_1_frame, motion_2_frame, skill_2_frame = self.parse_frames_two_stage(

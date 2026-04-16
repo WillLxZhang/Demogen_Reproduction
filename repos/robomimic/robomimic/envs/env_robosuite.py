@@ -4,6 +4,7 @@ to provide a standardized environment API for training policies and interacting
 with metadata present in datasets.
 """
 import json
+import xml.etree.ElementTree as ET
 import numpy as np
 from copy import deepcopy
 
@@ -40,6 +41,23 @@ try:
     MUJOCO_EXCEPTIONS = [mujoco_py.builder.MujocoException]
 except ImportError:
     MUJOCO_EXCEPTIONS = []
+
+
+def sanitize_model_xml(xml_str):
+    if isinstance(xml_str, bytes):
+        xml_str = xml_str.decode("utf-8")
+
+    root = ET.fromstring(xml_str)
+    asset = root.find("asset")
+    if asset is not None:
+        for texture in asset.findall("texture"):
+            if "colorspace" in texture.attrib:
+                del texture.attrib["colorspace"]
+    for light in root.iter("light"):
+        light_type = light.attrib.pop("type", None)
+        if light_type == "directional":
+            light.set("directional", "true")
+    return ET.tostring(root, encoding="utf8").decode("utf8")
 
 
 class EnvRobosuite(EB.EnvBase):
@@ -100,10 +118,14 @@ class EnvRobosuite(EB.EnvBase):
             if kwargs["has_offscreen_renderer"]:
                 # ensure that we select the correct GPU device for rendering by testing for EGL rendering
                 # NOTE: this package should be installed from this link (https://github.com/StanfordVL/egl_probe)
-                import egl_probe
-                valid_gpu_devices = egl_probe.get_available_devices()
-                if len(valid_gpu_devices) > 0:
-                    kwargs["render_gpu_device_id"] = valid_gpu_devices[0]
+                try:
+                    import egl_probe
+
+                    valid_gpu_devices = egl_probe.get_available_devices()
+                    if len(valid_gpu_devices) > 0:
+                        kwargs["render_gpu_device_id"] = valid_gpu_devices[0]
+                except ImportError:
+                    pass
         else:
             # make sure gripper visualization is turned off (we almost always want this for learning)
             kwargs["gripper_visualization"] = False
@@ -193,6 +215,7 @@ class EnvRobosuite(EB.EnvBase):
             else:
                 # v1.4 and above use the class-based edit_model_xml function
                 xml = self.env.edit_model_xml(state["model"])
+            xml = sanitize_model_xml(xml)
             self.env.reset_from_xml_string(xml)
             self.env.sim.reset()
             if not self._is_v1:

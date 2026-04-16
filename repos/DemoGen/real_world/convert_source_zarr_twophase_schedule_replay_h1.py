@@ -24,9 +24,21 @@ def parse_args():
     parser.add_argument("--input-zarr", required=True)
     parser.add_argument("--output-zarr", required=True)
     parser.add_argument("--source-name", required=True)
-    parser.add_argument("--skill1-frame", type=int, required=True)
-    parser.add_argument("--motion2-frame", type=int, required=True)
-    parser.add_argument("--skill2-frame", type=int, required=True)
+    parser.add_argument(
+        "--skill1-frame",
+        required=True,
+        help="Frame spec: integer, JSON list / dict, or comma-separated values.",
+    )
+    parser.add_argument(
+        "--motion2-frame",
+        required=True,
+        help="Frame spec: integer, JSON list / dict, or comma-separated values.",
+    )
+    parser.add_argument(
+        "--skill2-frame",
+        required=True,
+        help="Frame spec: integer, JSON list / dict, or comma-separated values.",
+    )
     parser.add_argument("--use-linear-interpolation", action="store_true")
     parser.add_argument("--z-step-size", type=float, default=0.015)
     parser.add_argument("--copy-sam-mask", action="store_true")
@@ -36,6 +48,58 @@ def parse_args():
         help="Key whose segment prefix sum is used to calibrate the schedule total.",
     )
     return parser.parse_args()
+
+
+def parse_frame_spec(raw: str, arg_name: str):
+    raw = str(raw).strip()
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+
+    if "," in raw and not raw.startswith("[") and not raw.startswith("{"):
+        values = [part.strip() for part in raw.split(",") if part.strip()]
+        if not values:
+            raise ValueError(f"{arg_name} is empty")
+        return [int(value) for value in values]
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"{arg_name} must be an integer, JSON list / dict, or comma-separated values. got={raw!r}"
+        ) from exc
+
+    if isinstance(parsed, int):
+        return int(parsed)
+    if isinstance(parsed, list):
+        return [int(value) for value in parsed]
+    if isinstance(parsed, dict):
+        return {str(key): int(value) for key, value in parsed.items()}
+    raise ValueError(f"Unsupported {arg_name} spec type: {type(parsed).__name__}")
+
+
+def resolve_frame_spec(spec, episode_idx: int, arg_name: str) -> int:
+    if isinstance(spec, int):
+        return int(spec)
+    if isinstance(spec, list):
+        if episode_idx >= len(spec):
+            raise IndexError(
+                f"{arg_name} only has {len(spec)} entries, cannot index episode {episode_idx}"
+            )
+        return int(spec[episode_idx])
+    if isinstance(spec, dict):
+        for key in (str(episode_idx), episode_idx, f"demo_{episode_idx + 1}"):
+            if key in spec:
+                return int(spec[key])
+        raise KeyError(f"{arg_name} has no entry for episode {episode_idx}")
+    raise TypeError(f"Unsupported {arg_name} spec type: {type(spec).__name__}")
+
+
+def encode_frame_spec_attr(spec):
+    if isinstance(spec, int):
+        return int(spec)
+    return json.dumps(spec)
 
 
 def summarize_xyz(name, arr, threshold=1e-4):
@@ -147,10 +211,9 @@ def main():
     output_zarr = Path(args.output_zarr).expanduser().resolve()
     output_zarr.parent.mkdir(parents=True, exist_ok=True)
 
-    if args.motion2_frame < args.skill1_frame:
-        raise ValueError("motion2-frame must be >= skill1-frame")
-    if args.skill2_frame < args.motion2_frame:
-        raise ValueError("skill2-frame must be >= motion2-frame")
+    skill1_spec = parse_frame_spec(args.skill1_frame, "--skill1-frame")
+    motion2_spec = parse_frame_spec(args.motion2_frame, "--motion2-frame")
+    skill2_spec = parse_frame_spec(args.skill2_frame, "--skill2-frame")
 
     input_root = zarr.open(str(input_zarr), mode="r")
     input_data = input_root["data"]
@@ -200,10 +263,23 @@ def main():
     motion2_total_xyz_ls = []
 
     ep_start = 0
-    for ep_end in episode_ends:
+    for episode_idx, ep_end in enumerate(episode_ends):
         ep_end = int(ep_end)
-        m1_start, m1_end = clamp_segment(ep_start, ep_start + args.skill1_frame, ep_start, ep_end)
-        m2_start, m2_end = clamp_segment(ep_start + args.motion2_frame, ep_start + args.skill2_frame, ep_start, ep_end)
+        ep_len = ep_end - ep_start
+        ep_skill1 = resolve_frame_spec(skill1_spec, episode_idx, "--skill1-frame")
+        ep_motion2 = resolve_frame_spec(motion2_spec, episode_idx, "--motion2-frame")
+        ep_skill2 = resolve_frame_spec(skill2_spec, episode_idx, "--skill2-frame")
+        if not (0 <= ep_skill1 <= ep_motion2 <= ep_skill2 <= ep_len):
+            raise ValueError(
+                "Invalid per-episode frame spec: "
+                f"episode_idx={episode_idx}, episode_len={ep_len}, "
+                f"skill1={ep_skill1}, motion2={ep_motion2}, skill2={ep_skill2}"
+            )
+
+        m1_start = ep_start
+        m1_end = ep_start + ep_skill1
+        m2_start = ep_start + ep_motion2
+        m2_end = ep_start + ep_skill2
 
         m1_len = m1_end - m1_start
         m2_len = m2_end - m2_start
@@ -276,9 +352,9 @@ def main():
         "two_phase_pre_skill1_and_motion2_original_schedule_from_replay_calibrated_segment_sums_"
         "post_segments_parent_motion_action"
     )
-    out_meta.attrs["skill1_frame_for_schedule"] = int(args.skill1_frame)
-    out_meta.attrs["motion2_frame_for_schedule"] = int(args.motion2_frame)
-    out_meta.attrs["skill2_frame_for_schedule"] = int(args.skill2_frame)
+    out_meta.attrs["skill1_frame_for_schedule"] = encode_frame_spec_attr(skill1_spec)
+    out_meta.attrs["motion2_frame_for_schedule"] = encode_frame_spec_attr(motion2_spec)
+    out_meta.attrs["skill2_frame_for_schedule"] = encode_frame_spec_attr(skill2_spec)
     out_meta.attrs["use_linear_interpolation_for_schedule"] = bool(args.use_linear_interpolation)
     out_meta.attrs["z_step_size_for_schedule"] = float(args.z_step_size)
     out_meta.attrs["schedule_total_xyz_source_key"] = str(args.motion_source_key)

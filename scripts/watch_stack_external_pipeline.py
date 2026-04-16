@@ -209,6 +209,7 @@ def main() -> int:
                 "1",
                 "--horizon",
                 str(args.horizon),
+                "--custom-reset-from-manifest",
             ]
             guard_pid = start_process(guard_cmd, guard_log, repo_root)
             log_line(watchdog_log, f"RELAUNCHED GUARD pid={guard_pid}")

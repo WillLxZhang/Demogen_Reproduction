@@ -23,15 +23,14 @@ import diffusion_policies.env.robosuite.robosuite_wrapper as robosuite_wrapper
 from diffusion_policies.env.robosuite.robosuite_wrapper import Robosuite3DEnv
 
 from replay_zarr_episode import load_reset_state
+from relalign_task_spec import (
+    TASK_OBJECT_SPECS,
+    apply_translation_to_reset_state,
+    capture_body_xyz,
+    load_relalign_env_name,
+    split_translation,
+)
 from solve_lift_prefix_xyz_actions import instantiate_generator, load_cfg
-
-
-TASK_OBJECT_STATE_INDICES = {
-    "Stack": {
-        "object": np.array([10, 11, 12], dtype=np.int64),
-        "target": np.array([17, 18, 19], dtype=np.int64),
-    },
-}
 
 
 def parse_args() -> argparse.Namespace:
@@ -73,21 +72,12 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def split_translation(raw: np.ndarray | list[float]) -> tuple[np.ndarray, np.ndarray]:
-    arr = np.asarray(raw, dtype=np.float32).reshape(-1)
-    if arr.shape == (3,):
-        return arr, np.zeros(3, dtype=np.float32)
-    if arr.shape == (6,):
-        return arr[:3], arr[3:6]
-    raise ValueError(f"Expected translation shape (3,) or (6,), got {arr.shape}")
-
-
 def infer_twophase_frames(generator, source_demo, episode_idx: int) -> tuple[int, int, int]:
     if getattr(generator, "use_manual_parsing_frames", False):
         return (
-            int(generator.parsing_frames["skill-1"]),
-            int(generator.parsing_frames["motion-2"]),
-            int(generator.parsing_frames["skill-2"]),
+            int(generator.resolve_parsing_frame("skill-1", episode_idx)),
+            int(generator.resolve_parsing_frame("motion-2", episode_idx)),
+            int(generator.resolve_parsing_frame("skill-2", episode_idx)),
         )
     ee_poses = np.asarray(source_demo["state"][:, :3], dtype=np.float32)
     return tuple(
@@ -131,19 +121,6 @@ def candidate_xyzs():
     return np.asarray(list(itertools.product([-1.0, 0.0, 1.0], repeat=3)), dtype=np.float32)
 
 
-def _capture_stack_object_pos(env: Robosuite3DEnv, which: str) -> np.ndarray:
-    attr = {"object": "cubeA_body_id", "target": "cubeB_body_id"}.get(which)
-    if attr is None:
-        raise ValueError(f"Unsupported stack object selector: {which}")
-    if not hasattr(env.env, attr):
-        raise AttributeError(
-            f"Current rel-align solver expects env.env.{attr}. "
-            "For other tasks, add a task-specific object body accessor."
-        )
-    body_id = getattr(env.env, attr)
-    return np.asarray(env.env.sim.data.body_xpos[body_id][:3], dtype=np.float32).copy()
-
-
 def replay_source_reference(
     source_demo_path: Path,
     source_episode_idx: int,
@@ -152,19 +129,20 @@ def replay_source_reference(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     robosuite_wrapper.N_CONTROL_STEPS = control_steps
     env = Robosuite3DEnv(str(source_demo_path), render=False)
+    env_name = load_relalign_env_name(source_demo_path)
     reset_state = load_reset_state(source_demo_path, source_episode_idx)
     obs = env.reset_to(reset_state)
 
     eef_hist = [np.asarray(obs["agent_pos"][:3], dtype=np.float32).copy()]
-    obj_hist = [_capture_stack_object_pos(env, "object")]
-    tar_hist = [_capture_stack_object_pos(env, "target")]
+    obj_hist = [capture_body_xyz(env, env_name, "object")]
+    tar_hist = [capture_body_xyz(env, env_name, "target")]
 
     try:
         for action in np.asarray(source_actions, dtype=np.float32):
             obs, _, _, _ = env.step(action)
             eef_hist.append(np.asarray(obs["agent_pos"][:3], dtype=np.float32).copy())
-            obj_hist.append(_capture_stack_object_pos(env, "object"))
-            tar_hist.append(_capture_stack_object_pos(env, "target"))
+            obj_hist.append(capture_body_xyz(env, env_name, "object"))
+            tar_hist.append(capture_body_xyz(env, env_name, "target"))
     finally:
         env.close()
 
@@ -221,13 +199,13 @@ def solve_motion1_actions(
 ):
     robosuite_wrapper.N_CONTROL_STEPS = control_steps
     env = Robosuite3DEnv(str(source_demo_path), render=False)
+    env_name = load_relalign_env_name(source_demo_path)
     reset_state = load_reset_state(source_demo_path, source_episode_idx)
-    reset_state["states"] = np.asarray(reset_state["states"], dtype=np.float64).copy()
-    reset_state["states"][TASK_OBJECT_STATE_INDICES["Stack"]["object"]] += np.asarray(
-        object_translation[:3], dtype=np.float64
-    )
-    reset_state["states"][TASK_OBJECT_STATE_INDICES["Stack"]["target"]] += np.asarray(
-        target_translation[:3], dtype=np.float64
+    reset_state = apply_translation_to_reset_state(
+        reset_state=reset_state,
+        env_name=env_name,
+        object_translation=object_translation,
+        target_translation=target_translation,
     )
     obs = env.reset_to(reset_state)
 
@@ -235,7 +213,7 @@ def solve_motion1_actions(
     solved_actions = []
     observed_obs_xyz = [np.asarray(obs["agent_pos"][:3], dtype=np.float32).copy()]
     observed_rel_xyz = [
-        np.asarray(observed_obs_xyz[-1] - _capture_stack_object_pos(env, "object"), dtype=np.float32)
+        np.asarray(observed_obs_xyz[-1] - capture_body_xyz(env, env_name, "object"), dtype=np.float32)
     ]
     step_summaries = []
 
@@ -262,7 +240,7 @@ def solve_motion1_actions(
                     raise RuntimeError("env.reset_to(states=...) did not return observation")
                 obs_next, _, _, _ = env.step(cand_action)
                 next_xyz = np.asarray(obs_next["agent_pos"][:3], dtype=np.float32)
-                next_obj_xyz = _capture_stack_object_pos(env, "object")
+                next_obj_xyz = capture_body_xyz(env, env_name, "object")
                 next_rel = next_xyz - next_obj_xyz
 
                 pos_err = next_xyz - desired_next_xyz
@@ -294,7 +272,7 @@ def solve_motion1_actions(
             env.reset_to({"states": current_state})
             obs_next, _, _, _ = env.step(best["cand_action"])
             next_xyz = np.asarray(obs_next["agent_pos"][:3], dtype=np.float32)
-            next_rel = next_xyz - _capture_stack_object_pos(env, "object")
+            next_rel = next_xyz - capture_body_xyz(env, env_name, "object")
 
             solved_actions.append(best["cand_action"].copy())
             observed_obs_xyz.append(next_xyz.copy())

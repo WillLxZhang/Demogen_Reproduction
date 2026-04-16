@@ -94,6 +94,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--motion1-relative-cost-weight", type=float, default=4.0)
     parser.add_argument("--motion2-relative-tail-steps", type=int, default=40)
     parser.add_argument("--motion2-relative-cost-weight", type=float, default=4.0)
+    parser.add_argument("--eval-source-episode", type=int, default=0)
+    parser.add_argument("--eval-object-translation", type=float, nargs=3, default=[0.0, 0.0, 0.0])
+    parser.add_argument("--eval-target-translation", type=float, nargs=3, default=[0.0, 0.0, 0.0])
     parser.add_argument("--skip-generate", action="store_true")
     parser.add_argument("--skip-solve", action="store_true")
     parser.add_argument("--skip-export", action="store_true")
@@ -332,6 +335,9 @@ def write_markdown_summary(*, summary_path: Path, manifest: dict) -> None:
         f"- solve_json: `{manifest['solve_json']}`",
         f"- exported_hdf5: `{manifest['exported_hdf5']}`",
         f"- train_config: `{manifest['train_config']}`",
+        f"- eval_source_episode: `{manifest.get('eval_source_episode')}`",
+        f"- eval_object_translation: `{manifest.get('eval_object_translation')}`",
+        f"- eval_target_translation: `{manifest.get('eval_target_translation')}`",
     ]
     if manifest.get("train_run_dir") is not None:
         lines.extend(
@@ -427,6 +433,9 @@ def main() -> int:
         "exported_hdf5": str(exported_hdf5),
         "train_config": str(train_config),
         "train_run_name": train_run_name,
+        "eval_source_episode": int(args.eval_source_episode),
+        "eval_object_translation": [float(x) for x in args.eval_object_translation],
+        "eval_target_translation": [float(x) for x in args.eval_target_translation],
         "updated_at": now_str(),
     }
     write_json(manifest_path, manifest)

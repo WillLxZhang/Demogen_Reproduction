@@ -21,8 +21,8 @@ if str(DIFFUSION_POLICIES_ROOT) not in sys.path:
 import diffusion_policies.env.robosuite.robosuite_wrapper as robosuite_wrapper
 from diffusion_policies.env.robosuite.robosuite_wrapper import Robosuite3DEnv
 
+from relalign_task_spec import apply_translation_to_reset_state as apply_relalign_translation
 from replay_zarr_episode import ensure_parent, load_env_name, load_reset_state
-from replay_zarr_episode_stack_twophase import TASK_OBJECT_STATE_INDICES
 
 
 def parse_args() -> argparse.Namespace:
@@ -119,22 +119,16 @@ def apply_translation_to_reset_state(
     object_translation: np.ndarray | None,
     target_translation: np.ndarray | None,
 ) -> None:
-    indices_cfg = TASK_OBJECT_STATE_INDICES.get(env_name)
-    if indices_cfg is None:
-        raise ValueError(f"No object-state indices configured for env {env_name}")
-
     if object_translation is None and target_translation is None:
         return
 
-    reset_state["states"] = np.asarray(reset_state["states"], dtype=np.float64).copy()
-
-    if object_translation is not None and indices_cfg.get("object") is not None:
-        idx = np.asarray(indices_cfg["object"], dtype=np.int64)
-        reset_state["states"][idx] += object_translation[: len(idx)]
-
-    if target_translation is not None and indices_cfg.get("target") is not None:
-        idx = np.asarray(indices_cfg["target"], dtype=np.int64)
-        reset_state["states"][idx] += target_translation[: len(idx)]
+    translated = apply_relalign_translation(
+        reset_state=reset_state,
+        env_name=env_name,
+        object_translation=object_translation,
+        target_translation=target_translation,
+    )
+    reset_state["states"] = translated["states"]
 
 
 def main() -> None:

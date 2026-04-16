@@ -41,6 +41,10 @@ class GuardState:
     manifest_path: str
     train_run_name: str
     run_dir: str | None = None
+    custom_reset_source_demo: str | None = None
+    custom_reset_source_episode: int | None = None
+    custom_reset_object_translation: list[float] | None = None
+    custom_reset_target_translation: list[float] | None = None
     checkpoints: dict[str, EpochState] = field(default_factory=dict)
     updated_at: str | None = None
 
@@ -78,6 +82,15 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Path to eval_robomimic_checkpoint_multiseed.py. Defaults to repo script.",
     )
+    parser.add_argument(
+        "--custom-reset-from-manifest",
+        action="store_true",
+        help="Use source-demo custom reset settings from the manifest when launching evaluation.",
+    )
+    parser.add_argument("--custom-reset-source-demo", default=None)
+    parser.add_argument("--custom-reset-source-episode", type=int, default=None)
+    parser.add_argument("--custom-reset-object-translation", type=float, nargs=3, default=None)
+    parser.add_argument("--custom-reset-target-translation", type=float, nargs=3, default=None)
     return parser.parse_args()
 
 
@@ -109,6 +122,10 @@ def save_state(path: Path, state: GuardState) -> None:
         "manifest_path": state.manifest_path,
         "train_run_name": state.train_run_name,
         "run_dir": state.run_dir,
+        "custom_reset_source_demo": state.custom_reset_source_demo,
+        "custom_reset_source_episode": state.custom_reset_source_episode,
+        "custom_reset_object_translation": state.custom_reset_object_translation,
+        "custom_reset_target_translation": state.custom_reset_target_translation,
         "checkpoints": {key: epoch_state_to_dict(value) for key, value in sorted(state.checkpoints.items(), key=lambda item: int(item[0]))},
         "updated_at": state.updated_at,
     }
@@ -160,6 +177,41 @@ def extract_mean_success(summary_path: Path) -> tuple[float, int]:
     return sum(completed) / len(completed), len(completed)
 
 
+def resolve_custom_reset_config(args: argparse.Namespace, manifest: dict[str, Any]) -> dict[str, Any] | None:
+    use_custom = bool(args.custom_reset_from_manifest or args.custom_reset_source_demo)
+    if not use_custom:
+        return None
+
+    source_demo = args.custom_reset_source_demo
+    if source_demo is None and args.custom_reset_from_manifest:
+        source_demo = manifest.get("source_demo", None)
+    if source_demo is None:
+        raise ValueError("custom reset requested but no source demo could be resolved")
+
+    source_episode = args.custom_reset_source_episode
+    if source_episode is None:
+        source_episode = manifest.get("eval_source_episode", 0)
+
+    object_translation = args.custom_reset_object_translation
+    if object_translation is None:
+        object_translation = manifest.get("eval_object_translation", [0.0, 0.0, 0.0])
+
+    target_translation = args.custom_reset_target_translation
+    if target_translation is None:
+        target_translation = manifest.get("eval_target_translation", [0.0, 0.0, 0.0])
+
+    source_demo_path = Path(str(source_demo)).expanduser().resolve()
+    if not source_demo_path.exists():
+        raise FileNotFoundError(f"custom reset source demo not found: {source_demo_path}")
+
+    return {
+        "source_demo": str(source_demo_path),
+        "source_episode": int(source_episode),
+        "object_translation": [float(x) for x in object_translation],
+        "target_translation": [float(x) for x in target_translation],
+    }
+
+
 def run_eval_stage(
     *,
     repo_root: Path,
@@ -176,6 +228,7 @@ def run_eval_stage(
     log_path: Path,
     guard_state_path: Path,
     guard_state: GuardState,
+    custom_reset_config: dict[str, Any] | None,
 ) -> StageState:
     stage_state.status = "running"
     stage_state.output_dir = str(output_dir)
@@ -204,6 +257,19 @@ def run_eval_stage(
         "--seeds",
         *[str(seed) for seed in seeds],
     ]
+    if custom_reset_config is not None:
+        cmd.extend(
+            [
+                "--custom-reset-source-demo",
+                str(custom_reset_config["source_demo"]),
+                "--custom-reset-source-episode",
+                str(custom_reset_config["source_episode"]),
+                "--custom-reset-object-translation",
+                *[str(x) for x in custom_reset_config["object_translation"]],
+                "--custom-reset-target-translation",
+                *[str(x) for x in custom_reset_config["target_translation"]],
+            ]
+        )
     log_message(log_path, f"STAGE START {stage_name}: {' '.join(cmd)}")
     with (output_dir / "stage.log").open("w", encoding="utf-8") as f:
         f.write("$ " + " ".join(cmd) + "\n\n")
@@ -259,6 +325,7 @@ def main() -> int:
         raise FileNotFoundError(f"eval script not found: {eval_script}")
 
     manifest = load_manifest(manifest_path)
+    custom_reset_config = resolve_custom_reset_config(args, manifest)
     train_run_name = str(manifest["train_run_name"])
     run_root = external_root / "outputs" / "robomimic" / "diffusion_policy_demogen" / train_run_name
     guard_root = external_root / "outputs" / "robomimic" / "checkpoint_eval_guard"
@@ -269,6 +336,10 @@ def main() -> int:
         external_root=str(external_root),
         manifest_path=str(manifest_path),
         train_run_name=train_run_name,
+        custom_reset_source_demo=custom_reset_config["source_demo"] if custom_reset_config is not None else None,
+        custom_reset_source_episode=custom_reset_config["source_episode"] if custom_reset_config is not None else None,
+        custom_reset_object_translation=custom_reset_config["object_translation"] if custom_reset_config is not None else None,
+        custom_reset_target_translation=custom_reset_config["target_translation"] if custom_reset_config is not None else None,
         checkpoints={str(epoch): EpochState(epoch=epoch) for epoch in sorted(set(args.checkpoints))},
         updated_at=now_str(),
     )
@@ -289,7 +360,8 @@ def main() -> int:
         log_path,
         (
             f"GUARD START external_root={external_root} train_run_name={train_run_name} "
-            f"checkpoints={sorted(set(args.checkpoints))} short_threshold={args.short_threshold:.3f}"
+            f"checkpoints={sorted(set(args.checkpoints))} short_threshold={args.short_threshold:.3f} "
+            f"custom_reset_source_demo={state.custom_reset_source_demo}"
         ),
     )
 
@@ -345,6 +417,7 @@ def main() -> int:
                     log_path=log_path,
                     guard_state_path=state_path,
                     guard_state=state,
+                    custom_reset_config=custom_reset_config,
                 )
                 state.updated_at = now_str()
                 save_state(state_path, state)
@@ -401,6 +474,7 @@ def main() -> int:
                     log_path=log_path,
                     guard_state_path=state_path,
                     guard_state=state,
+                    custom_reset_config=custom_reset_config,
                 )
                 state.updated_at = now_str()
                 save_state(state_path, state)

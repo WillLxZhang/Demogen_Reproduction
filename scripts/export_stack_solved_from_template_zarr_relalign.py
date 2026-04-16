@@ -23,9 +23,14 @@ from diffusion_policies.common.replay_buffer import ReplayBuffer
 import diffusion_policies.env.robosuite.robosuite_wrapper as robosuite_wrapper
 from diffusion_policies.env.robosuite.robosuite_wrapper import Robosuite3DEnv
 
+from relalign_task_spec import (
+    apply_translation_to_reset_state,
+    load_relalign_env_name,
+    split_translation,
+    zero_translation_for_env,
+)
 from replay_zarr_episode import load_reset_state
 from solve_stack_motion1_relalign_actions import (
-    TASK_OBJECT_STATE_INDICES,
     build_desired_motion1_states,
     build_desired_relative_xyz,
     build_summary,
@@ -33,7 +38,6 @@ from solve_stack_motion1_relalign_actions import (
     instantiate_generator,
     load_cfg,
     solve_motion1_actions,
-    split_translation,
 )
 
 
@@ -124,14 +128,14 @@ def replay_full_episode(
 ):
     robosuite_wrapper.N_CONTROL_STEPS = control_steps
     env = Robosuite3DEnv(str(source_demo_path), render=False)
+    env_name = env.task_name
 
     reset_state = load_reset_state(source_demo_path, source_episode_idx)
-    reset_state["states"] = np.asarray(reset_state["states"], dtype=np.float64).copy()
-    reset_state["states"][TASK_OBJECT_STATE_INDICES["Stack"]["object"]] += np.asarray(
-        object_translation[:3], dtype=np.float64
-    )
-    reset_state["states"][TASK_OBJECT_STATE_INDICES["Stack"]["target"]] += np.asarray(
-        target_translation[:3], dtype=np.float64
+    reset_state = apply_translation_to_reset_state(
+        reset_state=reset_state,
+        env_name=env_name,
+        object_translation=object_translation,
+        target_translation=target_translation,
     )
     obs = env.reset_to(reset_state)
 
@@ -208,6 +212,7 @@ def main():
 
     cfg = load_cfg(config_path, data_root)
     cfg.source_demo_hdf5 = str(source_demo_path)
+    env_name = load_relalign_env_name(source_demo_path)
     generator = instantiate_generator(cfg)
     template_meta = load_template_meta(template_zarr)
     template_buffer = ReplayBuffer.copy_from_path(
@@ -223,6 +228,8 @@ def main():
         source_episode_idx = int(template_meta["source_episode_idx"][gen_ep_idx])
         translation = np.asarray(template_meta["object_translation"][gen_ep_idx], dtype=np.float32)
         object_translation, target_translation = split_translation(translation)
+        if target_translation is None:
+            target_translation = zero_translation_for_env(env_name)[:3]
         motion_frame_count = int(template_meta["motion_frame_count"][gen_ep_idx])
         solve_steps = int(args.solve_steps) if args.solve_steps is not None else motion_frame_count
         if solve_steps > motion_frame_count:

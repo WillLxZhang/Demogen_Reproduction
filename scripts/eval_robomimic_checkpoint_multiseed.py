@@ -49,6 +49,24 @@ def parse_args() -> argparse.Namespace:
         help="Seeds to evaluate, e.g. --seeds 1 2 3",
     )
     parser.add_argument("--conda-env", default="robomimic", help="Conda env name")
+    parser.add_argument(
+        "--custom-reset-source-demo",
+        default=None,
+        help="If set, evaluate from this source demo reset instead of default env.reset().",
+    )
+    parser.add_argument("--custom-reset-source-episode", type=int, default=0)
+    parser.add_argument(
+        "--custom-reset-object-translation",
+        type=float,
+        nargs=3,
+        default=[0.0, 0.0, 0.0],
+    )
+    parser.add_argument(
+        "--custom-reset-target-translation",
+        type=float,
+        nargs=3,
+        default=[0.0, 0.0, 0.0],
+    )
     return parser.parse_args()
 
 
@@ -83,11 +101,20 @@ def save_reports(
     horizon: int,
     results: dict[int, SeedResult],
     reports_dir: Path,
+    *,
+    custom_reset_source_demo: Path | None = None,
+    custom_reset_source_episode: int = 0,
+    custom_reset_object_translation: list[float] | None = None,
+    custom_reset_target_translation: list[float] | None = None,
 ) -> None:
     payload = {
         "checkpoint": str(checkpoint),
         "n_rollouts": n_rollouts,
         "horizon": horizon,
+        "custom_reset_source_demo": str(custom_reset_source_demo) if custom_reset_source_demo is not None else None,
+        "custom_reset_source_episode": int(custom_reset_source_episode),
+        "custom_reset_object_translation": custom_reset_object_translation,
+        "custom_reset_target_translation": custom_reset_target_translation,
         "results": {str(seed): asdict(result) for seed, result in sorted(results.items())},
     }
 
@@ -163,7 +190,42 @@ def save_reports(
     (reports_dir / "leaderboard.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def build_command(checkpoint: Path, seed: int, n_rollouts: int, horizon: int, conda_env: str) -> list[str]:
+def build_command(
+    checkpoint: Path,
+    seed: int,
+    n_rollouts: int,
+    horizon: int,
+    conda_env: str,
+    custom_reset_source_demo: Path | None,
+    custom_reset_source_episode: int,
+    custom_reset_object_translation: list[float],
+    custom_reset_target_translation: list[float],
+) -> list[str]:
+    if custom_reset_source_demo is not None:
+        return [
+            "conda",
+            "run",
+            "-n",
+            conda_env,
+            "python",
+            "scripts/eval_robomimic_checkpoint_custom_reset.py",
+            "--checkpoint",
+            str(checkpoint),
+            "--source-demo",
+            str(custom_reset_source_demo),
+            "--source-episode",
+            str(custom_reset_source_episode),
+            "--object-translation",
+            *[str(x) for x in custom_reset_object_translation],
+            "--target-translation",
+            *[str(x) for x in custom_reset_target_translation],
+            "--n-rollouts",
+            str(n_rollouts),
+            "--horizon",
+            str(horizon),
+            "--seed",
+            str(seed),
+        ]
     return [
         "conda",
         "run",
@@ -187,17 +249,40 @@ def main() -> int:
     checkpoint = Path(args.checkpoint).expanduser().resolve()
     if not checkpoint.exists():
         raise FileNotFoundError(f"checkpoint not found: {checkpoint}")
+    custom_reset_source_demo = None
+    if args.custom_reset_source_demo:
+        custom_reset_source_demo = Path(args.custom_reset_source_demo).expanduser().resolve()
+        if not custom_reset_source_demo.exists():
+            raise FileNotFoundError(f"custom reset source demo not found: {custom_reset_source_demo}")
 
     output_paths = ensure_dirs(Path(args.output_dir).expanduser().resolve())
     results: dict[int, SeedResult] = {}
     running: dict[int, tuple[subprocess.Popen[str], Any, Path]] = {}
     pending = list(args.seeds)
 
-    save_reports(checkpoint, args.n_rollouts, args.horizon, results, output_paths["reports"])
+    save_reports(
+        checkpoint,
+        args.n_rollouts,
+        args.horizon,
+        results,
+        output_paths["reports"],
+        custom_reset_source_demo=custom_reset_source_demo,
+        custom_reset_source_episode=args.custom_reset_source_episode,
+        custom_reset_object_translation=list(args.custom_reset_object_translation),
+        custom_reset_target_translation=list(args.custom_reset_target_translation),
+    )
     print(f"[{now_str()}] checkpoint -> {checkpoint}", flush=True)
     print(f"[{now_str()}] output -> {output_paths['root']}", flush=True)
     print(f"[{now_str()}] seeds -> {args.seeds}", flush=True)
     print(f"[{now_str()}] parallel_jobs -> {args.parallel_jobs}", flush=True)
+    if custom_reset_source_demo is not None:
+        print(
+            f"[{now_str()}] custom_reset -> source_demo={custom_reset_source_demo} "
+            f"episode={args.custom_reset_source_episode} "
+            f"object_translation={list(args.custom_reset_object_translation)} "
+            f"target_translation={list(args.custom_reset_target_translation)}",
+            flush=True,
+        )
 
     while pending or running:
         while pending and len(running) < max(1, int(args.parallel_jobs)):
@@ -210,7 +295,17 @@ def main() -> int:
             env["OPENBLAS_NUM_THREADS"] = "1"
             env["NUMEXPR_NUM_THREADS"] = "1"
             proc = subprocess.Popen(
-                build_command(checkpoint, seed, args.n_rollouts, args.horizon, args.conda_env),
+                build_command(
+                    checkpoint,
+                    seed,
+                    args.n_rollouts,
+                    args.horizon,
+                    args.conda_env,
+                    custom_reset_source_demo,
+                    args.custom_reset_source_episode,
+                    list(args.custom_reset_object_translation),
+                    list(args.custom_reset_target_translation),
+                ),
                 cwd=Path(__file__).resolve().parents[1],
                 env=env,
                 stdout=log_file,
@@ -225,7 +320,17 @@ def main() -> int:
                 started_at=now_str(),
                 updated_at=now_str(),
             )
-            save_reports(checkpoint, args.n_rollouts, args.horizon, results, output_paths["reports"])
+            save_reports(
+                checkpoint,
+                args.n_rollouts,
+                args.horizon,
+                results,
+                output_paths["reports"],
+                custom_reset_source_demo=custom_reset_source_demo,
+                custom_reset_source_episode=args.custom_reset_source_episode,
+                custom_reset_object_translation=list(args.custom_reset_object_translation),
+                custom_reset_target_translation=list(args.custom_reset_target_translation),
+            )
             print(f"[{now_str()}] launched seed {seed}", flush=True)
 
         finished: list[int] = []
@@ -251,7 +356,17 @@ def main() -> int:
             else:
                 result.status = "failed"
                 result.error = f"returncode={rc}"
-            save_reports(checkpoint, args.n_rollouts, args.horizon, results, output_paths["reports"])
+            save_reports(
+                checkpoint,
+                args.n_rollouts,
+                args.horizon,
+                results,
+                output_paths["reports"],
+                custom_reset_source_demo=custom_reset_source_demo,
+                custom_reset_source_episode=args.custom_reset_source_episode,
+                custom_reset_object_translation=list(args.custom_reset_object_translation),
+                custom_reset_target_translation=list(args.custom_reset_target_translation),
+            )
             print(
                 f"[{now_str()}] seed {seed} done: status={result.status}, "
                 f"success_rate={result.success_rate}, num_success={result.num_success}",
@@ -265,6 +380,17 @@ def main() -> int:
         if running:
             time.sleep(2.0)
 
+    save_reports(
+        checkpoint,
+        args.n_rollouts,
+        args.horizon,
+        results,
+        output_paths["reports"],
+        custom_reset_source_demo=custom_reset_source_demo,
+        custom_reset_source_episode=args.custom_reset_source_episode,
+        custom_reset_object_translation=list(args.custom_reset_object_translation),
+        custom_reset_target_translation=list(args.custom_reset_target_translation),
+    )
     print(f"[{now_str()}] all seeds finished", flush=True)
     return 0
 
