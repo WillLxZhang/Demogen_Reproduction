@@ -1,6 +1,6 @@
 [TOC]
 
-# 原文内容
+# 原文内容（我们复现的参照）
 * Pick-Cube、Handle-Press 是单物体空间随机化任务；Stack-Cube 是双物体任务。
 * 原文设置里，单物体任务从 1 条 source demonstration 生成 100 条空间增广 demonstrations；双物体任务因为初始配置组合更多，会生成 200 条 demonstrations。
 
@@ -12,7 +12,12 @@
 * 遗留问题：单视角观测下的 visual mismatch：随着物体在三维空间中移动，其可见外观和透视关系会发生变化，但合成点云仍保留 source demonstration 中的固定视角外观，因此 synthetic data 与真实观测之间存在偏差。
 
 * 论文在 Pick-Cube 上进一步发现，当增广数据的空间覆盖或密度继续增加时，性能提升会逐渐饱和。
+
+![alt text](04_cropped.png)
+>原文、几何代理路线、回放求解路线的原理对比示意图
 # Pipeline One-Stage New
+
+
 ## One-Stage
 
 
@@ -641,11 +646,15 @@ default-reset：
 - 4-100 相比原文 100 取得 65% / 成功率；单seed roll取得最高 80% 成功率
 - 9-153取得 95% / 91.6% 成功率
 
+
+[![Lift Cube 任务成功情形的可视化](./Files/imgs/lift_success.gif)](./Files/imgs/lift_success.mp4)
+>Lift Cube 任务成功情形的可视化
 #### Presss Handle
 - 4-100 训中70pth roll*10  成功率100% 
 - 3*seed 20roll 成功率100/100，和原文相符
 
-
+[![Press Handle 任务成功情形的可视化](./Files/imgs/handlepress.gif)](./Files/imgs/handlepress.mp4)
+>Press Handle 任务成功情形的可视化
 ### TwoStage -- Stack Cube Task / NutAssembly Task
 本质上是双物体的Pick & Place
 - stack任务采取1-81的配置（移动object&target的位置）
@@ -658,6 +667,11 @@ Stack & Nut 在default上均成功率很低，只有0.1-0.2：
 结论：说明lift和press实现了一定程度的泛化 而 stack/nut 在目前配置下位置泛化能力存在，一旦改变位姿朝向，姿态泛化就几乎为0，正在排查原因
 - 直到export回robomimic的hdf5回放也是正常的，并且能够取得分部内的成功，说明数据导出不是最主要原因
 
+[![Stack 任务成功情形的可视化](./Files/imgs/stack.gif)](./Files/imgs/stack.mp4)
+>Stack 任务成功情形的可视化
+
+[![Nut 任务成功情形的可视化](./Files/imgs/nut.gif)](./Files/imgs/nut.mp4)
+>Nut 任务成功情形的可视化
 ### 疑惑
 条件铺垫：
 - Demogen的数据增广仅涵盖平移，未涵盖xy内位姿的变化
@@ -894,6 +908,8 @@ python repos/robomimic/robomimic/scripts/visualize_robot_dataset.py \
 * 点云视频正常
 
 
+[![点云视频可视化](./Files/imgs/pointcloud.gif)](./Files/imgs/pointcloud.mp4)
+>点云视频可视化
 ### 从`hdf5`到`zarr`
 
 #### 问题
