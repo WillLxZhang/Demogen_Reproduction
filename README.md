@@ -13,8 +13,17 @@
 
 * 论文在 Pick-Cube 上进一步发现，当增广数据的空间覆盖或密度继续增加时，性能提升会逐渐饱和。
 
-![alt text](04_cropped.png)
+![alt text](./Files/imgs/04_cropped.png)
 >原文、几何代理路线、回放求解路线的原理对比示意图
+
+>最终版本 Lift Cube、Press Handle、Stack、Nut任务成功情形的可视化
+
+| Lift Cube | Press Handle |
+| --- | --- |
+| [![Lift Cube 任务成功情形的可视化](./Files/imgs/lift_success.gif)](./Files/imgs/lift_success.mp4) | [![Press Handle 任务成功情形的可视化](./Files/imgs/handlepress.gif)](./Files/imgs/handlepress.mp4) |
+| Stack | Nut |
+| [![Stack 任务成功情形的可视化](./Files/imgs/stack.gif)](./Files/imgs/stack.mp4) | [![Nut 任务成功情形的可视化](./Files/imgs/nut.gif)](./Files/imgs/nut.mp4) |
+
 # Pipeline One-Stage New
 
 
